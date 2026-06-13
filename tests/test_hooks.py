@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 from types import SimpleNamespace
 
@@ -245,3 +246,34 @@ async def test_extraction_uses_configured_provider_and_retries_failure(plugin) -
     assert plugin.context.llm_calls[0]["chat_provider_id"] == "cheap-provider"
     assert status.pending_count == 1
     assert status.next_retry_at is not None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_extraction_releases_claimed_batch(plugin) -> None:
+    event = FakeEvent(message="请记住这件事")
+    await plugin.observe_private_user(event)
+    await plugin.buffer_final_reply(
+        event,
+        SimpleNamespace(),
+        SimpleNamespace(role="assistant", completion_text="我会记住"),
+    )
+    started = asyncio.Event()
+
+    async def wait_forever(**kwargs):
+        del kwargs
+        started.set()
+        await asyncio.Event().wait()
+
+    plugin.context.llm_generate = wait_forever
+    task = asyncio.create_task(
+        plugin.process_extraction_scope("platform\x1fuser")
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    status = await plugin.store.get_extraction_status("platform\x1fuser")
+    assert status.pending_count == 2
+    assert status.processing_batch_id is None

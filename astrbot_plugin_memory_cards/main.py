@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
@@ -237,6 +238,16 @@ class MemoryCardsPlugin(Star):
                         candidate.content,
                     )
             await self.store.complete_extraction_batch(scope_key, batch.batch_id)
+        except asyncio.CancelledError:
+            await asyncio.shield(
+                self.store.fail_extraction_batch(
+                    scope_key,
+                    batch.batch_id,
+                    "自动整理任务已取消",
+                    datetime.now(UTC),
+                )
+            )
+            raise
         except Exception as exc:
             logger.exception("自动整理对话便签失败")
             await self.store.fail_extraction_batch(
