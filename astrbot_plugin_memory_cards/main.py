@@ -170,7 +170,7 @@ class MemoryCardsPlugin(Star):
         except Exception:
             logger.exception("读取便签用户失败")
             return self._error("读取用户列表失败", 500)
-        return jsonify({"ok": True, "data": [asdict(user) for user in users]})
+        return jsonify({"ok": True, "items": [asdict(user) for user in users]})
 
     async def api_notes(self):
         if not self._active:
@@ -197,7 +197,7 @@ class MemoryCardsPlugin(Star):
         return jsonify(
             {
                 "ok": True,
-                "data": [asdict(note) for note in notes],
+                "items": [asdict(note) for note in notes],
                 "total": total,
             }
         )
@@ -224,7 +224,7 @@ class MemoryCardsPlugin(Star):
         except Exception:
             logger.exception("新增便签失败")
             return self._error("新增便签失败", 500)
-        return jsonify({"ok": True, "data": asdict(note)})
+        return jsonify({"ok": True, "note": asdict(note)})
 
     async def api_update_note(self):
         if not self._active:
@@ -250,7 +250,7 @@ class MemoryCardsPlugin(Star):
             return self._error("更新便签失败", 500)
         if note is None:
             return self._error("便签不存在或不属于该用户", 404)
-        return jsonify({"ok": True, "data": asdict(note)})
+        return jsonify({"ok": True, "note": asdict(note)})
 
     async def api_delete_note(self):
         if not self._active:

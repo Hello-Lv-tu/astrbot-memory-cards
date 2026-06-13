@@ -20,6 +20,7 @@ def test_page_uses_astrbot_bridge_and_relative_endpoints() -> None:
         assert f'"{endpoint}"' in script
     assert "textContent" in script
     assert "innerHTML" not in script
+    assert "result.items" in script
 
 
 def test_page_contains_management_controls_and_states() -> None:

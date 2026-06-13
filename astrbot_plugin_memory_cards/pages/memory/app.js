@@ -145,7 +145,7 @@ async function loadUsers() {
   setStatus("正在读取私聊用户…");
   try {
     const result = unwrap(await bridge.apiGet("memory/users"));
-    state.users = result.data;
+    state.users = result.items;
     if (!state.users.some((user) => user.scope_key === state.scopeKey)) {
       state.scopeKey = state.users[0]?.scope_key || "";
     }
@@ -174,7 +174,7 @@ async function loadNotes() {
         offset: 0,
       }),
     );
-    state.notes = result.data;
+    state.notes = result.items;
     renderNotes();
     setStatus(result.total === 0 ? "" : `已显示 ${result.total} 条便签`);
   } catch (error) {

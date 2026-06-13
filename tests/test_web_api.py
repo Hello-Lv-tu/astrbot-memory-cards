@@ -62,7 +62,8 @@ async def test_users_and_filtered_notes(api_plugin) -> None:
     status, users = await call_handler(app, plugin.api_users)
     assert status == 200
     assert users["ok"] is True
-    assert users["data"][0]["scope_key"] in {"p\x1fu1", "p\x1fu2"}
+    assert "data" not in users
+    assert users["items"][0]["scope_key"] in {"p\x1fu1", "p\x1fu2"}
 
     status, notes = await call_handler(
         app,
@@ -78,7 +79,8 @@ async def test_users_and_filtered_notes(api_plugin) -> None:
     )
     assert status == 200
     assert notes["total"] == 1
-    assert notes["data"][0]["category"] == "偏好"
+    assert "data" not in notes
+    assert notes["items"][0]["category"] == "偏好"
 
 
 @pytest.mark.asyncio
@@ -93,7 +95,8 @@ async def test_create_update_and_delete_note(api_plugin) -> None:
         json={"scope_key": "p\x1fu1", "category": "待办", "content": "完成测试"},
     )
     assert status == 200
-    note_id = created["data"]["id"]
+    assert "data" not in created
+    note_id = created["note"]["id"]
 
     status, updated = await call_handler(
         app,
@@ -107,7 +110,7 @@ async def test_create_update_and_delete_note(api_plugin) -> None:
         },
     )
     assert status == 200
-    assert updated["data"]["content"] == "完成发布"
+    assert updated["note"]["content"] == "完成发布"
 
     status, deleted = await call_handler(
         app,

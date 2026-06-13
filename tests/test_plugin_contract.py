@@ -19,6 +19,7 @@ def test_plugin_package_contract() -> None:
         "metadata.yaml",
         "_conf_schema.json",
         "requirements.txt",
+        "CHANGELOG.md",
         "pages/memory/index.html",
         "pages/memory/app.js",
         "pages/memory/style.css",
