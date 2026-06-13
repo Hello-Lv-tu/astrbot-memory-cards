@@ -1,0 +1,23 @@
+[project]
+name = "astrbot-memory-cards"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["aiosqlite>=0.21,<1"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4,<10",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.15,<0.16",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "ASYNC"]

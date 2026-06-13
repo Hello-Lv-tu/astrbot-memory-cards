@@ -1,0 +1,27 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用相关便签自动注入",
+    "default": true
+  },
+  "max_injected_notes": {
+    "type": "int",
+    "description": "单次最多注入便签数",
+    "default": 5
+  },
+  "max_injected_chars": {
+    "type": "int",
+    "description": "单次最多注入便签字符数",
+    "default": 1500
+  },
+  "minimum_score": {
+    "type": "float",
+    "description": "便签相关性最低分",
+    "default": 3.0
+  },
+  "recall_fallback_enabled": {
+    "type": "bool",
+    "description": "明确询问记忆时返回最近便签",
+    "default": true
+  }
+}
