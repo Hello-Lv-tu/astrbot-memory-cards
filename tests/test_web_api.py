@@ -64,6 +64,7 @@ async def test_users_and_filtered_notes(api_plugin) -> None:
     assert users["ok"] is True
     assert "data" not in users
     assert users["items"][0]["scope_key"] in {"p\x1fu1", "p\x1fu2"}
+    assert users["items"][0]["pending_message_count"] == 0
 
     status, notes = await call_handler(
         app,
@@ -81,6 +82,7 @@ async def test_users_and_filtered_notes(api_plugin) -> None:
     assert notes["total"] == 1
     assert "data" not in notes
     assert notes["items"][0]["category"] == "偏好"
+    assert notes["items"][0]["source"] == "manual"
 
 
 @pytest.mark.asyncio

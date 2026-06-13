@@ -289,6 +289,22 @@ textarea:focus {
   letter-spacing: 0.08em;
 }
 
+.note-labels {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.source-badge {
+  color: #7d4cc2;
+  background: rgba(164, 112, 219, 0.12);
+  border: 1px solid rgba(164, 112, 219, 0.24);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .note-card time {
   color: var(--muted);
   font-size: 0.72rem;

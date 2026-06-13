@@ -23,6 +23,8 @@ def test_page_uses_astrbot_bridge_and_relative_endpoints() -> None:
     assert "result.items" in script
     assert "notesRequestVersion" in script
     assert "requestVersion !== state.notesRequestVersion" in script
+    assert "自动生成" in script
+    assert "pending_message_count" in script
 
 
 def test_page_contains_management_controls_and_states() -> None:

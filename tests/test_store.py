@@ -196,7 +196,9 @@ async def test_buffer_claim_complete_and_new_messages(store) -> None:
     scope = "p\x1fu"
     await store.upsert_user(scope, "p", "u", "Alice")
     now = datetime.now(UTC)
-    await store.append_buffer_message(scope, "user", "我喜欢安静", "provider-a", now=now)
+    await store.append_buffer_message(
+        scope, "user", "我喜欢安静", "provider-a", now=now
+    )
     await store.append_buffer_message(
         scope,
         "assistant",

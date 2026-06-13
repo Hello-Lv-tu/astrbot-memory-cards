@@ -30,6 +30,10 @@ class UserSummary:
     display_name: str
     last_seen_at: str
     note_count: int = 0
+    pending_message_count: int = 0
+    last_message_at: str | None = None
+    last_extracted_at: str | None = None
+    last_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -96,7 +96,8 @@ class MemoryStore:
                     )
                 elif int(row["version"]) == 1:
                     await connection.execute(
-                        "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'"
+                        "ALTER TABLE notes ADD COLUMN source TEXT "
+                        "NOT NULL DEFAULT 'manual'"
                     )
                     await connection.execute(
                         "ALTER TABLE notes ADD COLUMN source_batch_id TEXT"
@@ -195,9 +196,17 @@ class MemoryStore:
                     u.user_id,
                     u.display_name,
                     u.last_seen_at,
-                    COUNT(n.id) AS note_count
+                    COUNT(n.id) AS note_count,
+                    (
+                        SELECT COUNT(*) FROM message_buffer AS b
+                        WHERE b.scope_key = u.scope_key AND b.batch_id IS NULL
+                    ) AS pending_message_count,
+                    s.last_message_at,
+                    s.last_extracted_at,
+                    s.last_error
                 FROM users AS u
                 LEFT JOIN notes AS n ON n.scope_key = u.scope_key
+                LEFT JOIN extraction_state AS s ON s.scope_key = u.scope_key
                 GROUP BY u.scope_key
                 ORDER BY u.last_seen_at DESC, u.scope_key ASC
                 """
@@ -212,6 +221,10 @@ class MemoryStore:
                 display_name=row["display_name"],
                 last_seen_at=row["last_seen_at"],
                 note_count=int(row["note_count"]),
+                pending_message_count=int(row["pending_message_count"]),
+                last_message_at=row["last_message_at"],
+                last_extracted_at=row["last_extracted_at"],
+                last_error=row["last_error"],
             )
             for row in rows
         ]

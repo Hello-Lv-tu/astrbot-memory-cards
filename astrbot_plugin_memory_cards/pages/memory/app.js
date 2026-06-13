@@ -82,7 +82,10 @@ function renderUsers() {
   for (const user of state.users) {
     const option = document.createElement("option");
     option.value = user.scope_key;
-    option.textContent = `${user.display_name || user.user_id} · ${user.platform_id} (${user.note_count})`;
+    const pending = user.pending_message_count
+      ? ` · 待整理 ${user.pending_message_count}`
+      : "";
+    option.textContent = `${user.display_name || user.user_id} · ${user.platform_id} (${user.note_count})${pending}`;
     elements.userSelect.append(option);
   }
   elements.userSelect.value = state.scopeKey;
@@ -122,10 +125,19 @@ function renderNotes() {
     const category = document.createElement("span");
     category.className = "note-category";
     category.textContent = note.category;
+    const labels = document.createElement("div");
+    labels.className = "note-labels";
+    labels.append(category);
+    if (note.source === "auto") {
+      const source = document.createElement("span");
+      source.className = "source-badge";
+      source.textContent = "自动生成";
+      labels.append(source);
+    }
     const date = document.createElement("time");
     date.dateTime = note.updated_at;
     date.textContent = formatDate(note.updated_at);
-    header.append(category, date);
+    header.append(labels, date);
 
     const content = document.createElement("p");
     content.className = "note-content";
