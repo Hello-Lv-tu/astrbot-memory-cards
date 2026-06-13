@@ -10,6 +10,7 @@ const state = {
   keyword: "",
   editingId: null,
   deletingId: null,
+  notesRequestVersion: 0,
 };
 
 const elements = {
@@ -157,6 +158,10 @@ async function loadUsers() {
 }
 
 async function loadNotes() {
+  const requestVersion = ++state.notesRequestVersion;
+  const scopeKey = state.scopeKey;
+  const category = state.category;
+  const keyword = state.keyword;
   if (!state.scopeKey) {
     state.notes = [];
     renderNotes();
@@ -167,13 +172,21 @@ async function loadNotes() {
   try {
     const result = unwrap(
       await bridge.apiGet("memory/notes", {
-        scope_key: state.scopeKey,
-        category: state.category,
-        keyword: state.keyword,
+        scope_key: scopeKey,
+        category,
+        keyword,
         limit: 100,
         offset: 0,
       }),
     );
+    if (
+      requestVersion !== state.notesRequestVersion ||
+      scopeKey !== state.scopeKey ||
+      category !== state.category ||
+      keyword !== state.keyword
+    ) {
+      return;
+    }
     state.notes = result.items;
     renderNotes();
     setStatus(result.total === 0 ? "" : `已显示 ${result.total} 条便签`);

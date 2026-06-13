@@ -134,7 +134,9 @@ async def test_api_rejects_invalid_and_cross_scope_requests(api_plugin) -> None:
         method="POST",
         json={"scope_key": "p\x1fu1", "category": "偏好", "content": " "},
     )
-    assert status == 400
+    assert status == 200
+    assert invalid["status"] == "error"
+    assert invalid["code"] == 400
     assert "不能为空" in invalid["message"]
 
     status, missing = await call_handler(
@@ -143,7 +145,9 @@ async def test_api_rejects_invalid_and_cross_scope_requests(api_plugin) -> None:
         method="POST",
         json={"scope_key": "missing", "category": "其他", "content": "内容"},
     )
-    assert status == 404
+    assert status == 200
+    assert missing["status"] == "error"
+    assert missing["code"] == 404
     assert missing["message"] == "用户不存在"
 
     status, crossed = await call_handler(
@@ -157,7 +161,9 @@ async def test_api_rejects_invalid_and_cross_scope_requests(api_plugin) -> None:
             "content": "越权修改",
         },
     )
-    assert status == 404
+    assert status == 200
+    assert crossed["status"] == "error"
+    assert crossed["code"] == 404
     assert "不存在" in crossed["message"]
 
 
@@ -169,6 +175,8 @@ async def test_inactive_store_returns_503(api_plugin) -> None:
 
     status, body = await call_handler(app, plugin.api_users)
 
-    assert status == 503
+    assert status == 200
     assert body["ok"] is False
+    assert body["status"] == "error"
+    assert body["code"] == 503
     assert "未就绪" in body["message"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from html import escape
+
 from .models import MemoryNote
 
 _HEADER = """<memory_cards>
@@ -24,16 +26,20 @@ def build_memory_context(
 
     lines = [_HEADER.rstrip()]
     for note in notes:
-        line = f"[{note.category}] {note.content}"
+        safe_category = escape(note.category, quote=False)
+        safe_content = escape(note.content, quote=False)
+        line = f"[{safe_category}] {safe_content}"
         candidate = "\n".join([*lines, line, _FOOTER])
         if len(candidate) <= max_chars:
             lines.append(line)
             continue
         if len(lines) == 1:
             remaining = max_chars - len("\n".join([*lines, "", _FOOTER]))
-            if remaining > len(f"[{note.category}] ") + 1:
-                prefix = f"[{note.category}] "
-                lines.append(prefix + note.content[: remaining - len(prefix) - 1] + "…")
+            prefix = f"[{safe_category}] "
+            if remaining > len(prefix) + 1:
+                lines.append(
+                    prefix + safe_content[: remaining - len(prefix) - 1] + "…"
+                )
         break
 
     if len(lines) == 1:

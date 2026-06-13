@@ -143,7 +143,7 @@ async def test_disabled_or_unrelated_request_is_not_injected(plugin) -> None:
 @pytest.mark.asyncio
 async def test_store_failure_does_not_block_request(plugin) -> None:
     class BrokenStore:
-        async def list_notes(self, *args, **kwargs):
+        async def list_notes_for_retrieval(self, *args, **kwargs):
             raise RuntimeError("database unavailable")
 
     await plugin.store.close()
@@ -153,3 +153,19 @@ async def test_store_failure_does_not_block_request(plugin) -> None:
     await plugin.inject_memory(FakeEvent(), request)
 
     assert request.extra_user_content_parts == []
+
+
+@pytest.mark.asyncio
+async def test_old_matching_note_beyond_first_hundred_is_injected(plugin) -> None:
+    event = FakeEvent(message="我那只叫月饼的猫怎么样")
+    await plugin.observe_private_user(event)
+    scope = "platform\x1fuser"
+    await plugin.store.create_note(scope, "人物", "用户的猫叫月饼")
+    for index in range(105):
+        await plugin.store.create_note(scope, "其他", f"最近普通便签 {index}")
+    request = FakeRequest(prompt="我那只叫月饼的猫怎么样")
+
+    await plugin.inject_memory(event, request)
+
+    assert len(request.extra_user_content_parts) == 1
+    assert "用户的猫叫月饼" in request.extra_user_content_parts[0].text

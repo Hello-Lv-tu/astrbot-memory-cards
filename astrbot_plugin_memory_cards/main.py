@@ -126,10 +126,7 @@ class MemoryCardsPlugin(Star):
             return
 
         try:
-            notes, _ = await self.store.list_notes(
-                identity[0],
-                limit=100,
-            )
+            notes = await self.store.list_notes_for_retrieval(identity[0])
             selected = select_relevant_notes(
                 query,
                 notes,
@@ -286,4 +283,11 @@ class MemoryCardsPlugin(Star):
 
     @staticmethod
     def _error(message: str, status: int):
-        return jsonify({"ok": False, "message": message}), status
+        return jsonify(
+            {
+                "ok": False,
+                "status": "error",
+                "code": status,
+                "message": message,
+            }
+        )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from astrbot_plugin_memory_cards.models import MAX_CONTENT_LENGTH
@@ -114,3 +116,32 @@ async def test_closed_store_rejects_operations(tmp_path) -> None:
     store = MemoryStore(tmp_path / "memory.db")
     with pytest.raises(RuntimeError, match="未就绪"):
         await store.list_users()
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_in_flight_read(store) -> None:
+    await store.upsert_user("p\x1fu", "p", "u", "Alice")
+    await store._lock.acquire()
+    read_task = asyncio.create_task(store.list_users())
+    close_task = asyncio.create_task(store.close())
+    await asyncio.sleep(0)
+
+    assert not read_task.done()
+    assert not close_task.done()
+
+    store._lock.release()
+    users = await read_task
+    await close_task
+    assert users[0].scope_key == "p\x1fu"
+
+
+@pytest.mark.asyncio
+async def test_retrieval_reads_more_than_ui_page_limit(store) -> None:
+    scope = "p\x1fu"
+    await store.upsert_user(scope, "p", "u", "Alice")
+    for index in range(105):
+        await store.create_note(scope, "其他", f"普通便签 {index}")
+
+    notes = await store.list_notes_for_retrieval(scope)
+
+    assert len(notes) == 105

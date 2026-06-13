@@ -141,24 +141,25 @@ class MemoryStore:
         )
 
     async def list_users(self) -> list[UserSummary]:
-        connection = self._require_connection()
-        cursor = await connection.execute(
-            """
-            SELECT
-                u.scope_key,
-                u.platform_id,
-                u.user_id,
-                u.display_name,
-                u.last_seen_at,
-                COUNT(n.id) AS note_count
-            FROM users AS u
-            LEFT JOIN notes AS n ON n.scope_key = u.scope_key
-            GROUP BY u.scope_key
-            ORDER BY u.last_seen_at DESC, u.scope_key ASC
-            """
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
+        async with self._lock:
+            connection = self._require_connection()
+            cursor = await connection.execute(
+                """
+                SELECT
+                    u.scope_key,
+                    u.platform_id,
+                    u.user_id,
+                    u.display_name,
+                    u.last_seen_at,
+                    COUNT(n.id) AS note_count
+                FROM users AS u
+                LEFT JOIN notes AS n ON n.scope_key = u.scope_key
+                GROUP BY u.scope_key
+                ORDER BY u.last_seen_at DESC, u.scope_key ASC
+                """
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
         return [
             UserSummary(
                 scope_key=row["scope_key"],
@@ -172,7 +173,15 @@ class MemoryStore:
         ]
 
     async def user_exists(self, scope_key: str) -> bool:
-        connection = self._require_connection()
+        async with self._lock:
+            connection = self._require_connection()
+            return await self._user_exists(connection, scope_key)
+
+    @staticmethod
+    async def _user_exists(
+        connection: aiosqlite.Connection,
+        scope_key: str,
+    ) -> bool:
         cursor = await connection.execute(
             "SELECT 1 FROM users WHERE scope_key = ?",
             (scope_key,),
@@ -192,7 +201,7 @@ class MemoryStore:
         timestamp = _now()
         async with self._lock:
             connection = self._require_connection()
-            if not await self.user_exists(scope_key):
+            if not await self._user_exists(connection, scope_key):
                 raise ValueError("用户不存在")
             try:
                 cursor = await connection.execute(
@@ -229,7 +238,16 @@ class MemoryStore:
         scope_key: str,
         note_id: int,
     ) -> MemoryNote | None:
-        connection = self._require_connection()
+        async with self._lock:
+            connection = self._require_connection()
+            return await self._get_note(connection, scope_key, note_id)
+
+    async def _get_note(
+        self,
+        connection: aiosqlite.Connection,
+        scope_key: str,
+        note_id: int,
+    ) -> MemoryNote | None:
         cursor = await connection.execute(
             """
             SELECT id, scope_key, category, content, created_at, updated_at
@@ -251,7 +269,6 @@ class MemoryStore:
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[MemoryNote], int]:
-        connection = self._require_connection()
         limit = max(1, min(int(limit), 100))
         offset = max(0, int(offset))
         clauses = ["scope_key = ?"]
@@ -270,29 +287,50 @@ class MemoryStore:
             params.append(normalize_category(category))
         where = " AND ".join(clauses)
 
-        count_cursor = await connection.execute(
-            f"SELECT COUNT(*) AS total FROM notes WHERE {where}",
-            params,
-        )
-        count_row = await count_cursor.fetchone()
-        await count_cursor.close()
+        async with self._lock:
+            connection = self._require_connection()
+            count_cursor = await connection.execute(
+                f"SELECT COUNT(*) AS total FROM notes WHERE {where}",
+                params,
+            )
+            count_row = await count_cursor.fetchone()
+            await count_cursor.close()
 
-        cursor = await connection.execute(
-            f"""
-            SELECT id, scope_key, category, content, created_at, updated_at
-            FROM notes
-            WHERE {where}
-            ORDER BY updated_at DESC, id DESC
-            LIMIT ? OFFSET ?
-            """,
-            [*params, limit, offset],
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
+            cursor = await connection.execute(
+                f"""
+                SELECT id, scope_key, category, content, created_at, updated_at
+                FROM notes
+                WHERE {where}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
         return (
             [self._note_from_row(row) for row in rows],
             int(count_row["total"] if count_row else 0),
         )
+
+    async def list_notes_for_retrieval(
+        self,
+        scope_key: str,
+    ) -> list[MemoryNote]:
+        async with self._lock:
+            connection = self._require_connection()
+            cursor = await connection.execute(
+                """
+                SELECT id, scope_key, category, content, created_at, updated_at
+                FROM notes
+                WHERE scope_key = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (scope_key,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [self._note_from_row(row) for row in rows]
 
     async def update_note(
         self,
@@ -323,9 +361,9 @@ class MemoryStore:
             await connection.commit()
             changed = cursor.rowcount > 0
             await cursor.close()
-        if not changed:
-            return None
-        return await self.get_note(scope_key, note_id)
+            if not changed:
+                return None
+            return await self._get_note(connection, scope_key, note_id)
 
     async def delete_note(self, scope_key: str, note_id: int) -> bool:
         async with self._lock:
