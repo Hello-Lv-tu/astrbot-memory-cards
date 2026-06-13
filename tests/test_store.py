@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -145,3 +147,112 @@ async def test_retrieval_reads_more_than_ui_page_limit(store) -> None:
     notes = await store.list_notes_for_retrieval(scope)
 
     assert len(notes) == 105
+
+
+@pytest.mark.asyncio
+async def test_v1_database_migrates_notes_to_manual_source(tmp_path) -> None:
+    path = tmp_path / "memory.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_meta (version INTEGER NOT NULL);
+        INSERT INTO schema_meta(version) VALUES (1);
+        CREATE TABLE users (
+            scope_key TEXT PRIMARY KEY,
+            platform_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        );
+        CREATE TABLE notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_key TEXT NOT NULL,
+            category TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO users VALUES ('p' || char(31) || 'u', 'p', 'u', 'Alice', 'now');
+        INSERT INTO notes(scope_key, category, content, created_at, updated_at)
+        VALUES ('p' || char(31) || 'u', '偏好', '喜欢安静', 'now', 'now');
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    from astrbot_plugin_memory_cards.store import MemoryStore
+
+    migrated = MemoryStore(path)
+    await migrated.open()
+    notes, _ = await migrated.list_notes("p\x1fu")
+
+    assert notes[0].source == "manual"
+    assert notes[0].source_batch_id is None
+    await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_buffer_claim_complete_and_new_messages(store) -> None:
+    scope = "p\x1fu"
+    await store.upsert_user(scope, "p", "u", "Alice")
+    now = datetime.now(UTC)
+    await store.append_buffer_message(scope, "user", "我喜欢安静", "provider-a", now=now)
+    await store.append_buffer_message(
+        scope,
+        "assistant",
+        "我记住了",
+        "provider-a",
+        now=now + timedelta(seconds=1),
+    )
+
+    status = await store.get_extraction_status(scope)
+    assert status.pending_count == 2
+
+    batch = await store.claim_extraction_batch(
+        scope,
+        message_threshold=2,
+        idle_before=None,
+        now=now + timedelta(seconds=2),
+    )
+    assert batch is not None
+    assert [message.role for message in batch.messages] == ["user", "assistant"]
+    assert await store.claim_extraction_batch(
+        scope,
+        message_threshold=2,
+        idle_before=None,
+        now=now + timedelta(seconds=2),
+    ) is None
+
+    await store.append_buffer_message(
+        scope,
+        "user",
+        "这是下一轮",
+        "provider-a",
+        now=now + timedelta(seconds=3),
+    )
+    await store.complete_extraction_batch(scope, batch.batch_id)
+    status = await store.get_extraction_status(scope)
+    assert status.pending_count == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_batch_is_released_with_retry(store) -> None:
+    scope = "p\x1fu"
+    await store.upsert_user(scope, "p", "u", "Alice")
+    now = datetime.now(UTC)
+    await store.append_buffer_message(scope, "user", "记住这个", "provider-a", now=now)
+    batch = await store.claim_extraction_batch(
+        scope,
+        message_threshold=1,
+        idle_before=None,
+        now=now,
+    )
+    assert batch is not None
+
+    retry_at = now + timedelta(minutes=10)
+    await store.fail_extraction_batch(scope, batch.batch_id, "模型失败", retry_at)
+    status = await store.get_extraction_status(scope)
+
+    assert status.pending_count == 1
+    assert status.next_retry_at == retry_at.isoformat(timespec="microseconds")
+    assert status.last_error == "模型失败"

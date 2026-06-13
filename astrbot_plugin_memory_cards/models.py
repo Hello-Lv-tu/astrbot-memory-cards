@@ -40,3 +40,34 @@ class MemoryNote:
     content: str
     created_at: str
     updated_at: str
+    source: str = "manual"
+    source_batch_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BufferedMessage:
+    id: int
+    scope_key: str
+    role: str
+    content: str
+    provider_id: str
+    created_at: str
+    batch_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionBatch:
+    batch_id: str
+    scope_key: str
+    messages: tuple[BufferedMessage, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ExtractionStatus:
+    scope_key: str
+    pending_count: int
+    last_message_at: str | None
+    next_retry_at: str | None
+    processing_batch_id: str | None
+    last_error: str | None
+    last_extracted_at: str | None

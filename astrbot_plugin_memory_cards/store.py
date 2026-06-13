@@ -5,17 +5,21 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
 import aiosqlite
 
 from .models import (
+    BufferedMessage,
+    ExtractionBatch,
+    ExtractionStatus,
     MemoryNote,
     UserSummary,
     normalize_category,
     normalize_content,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _now() -> str:
@@ -67,6 +71,8 @@ class MemoryStore:
                         content TEXT NOT NULL,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'manual',
+                        source_batch_id TEXT,
                         FOREIGN KEY(scope_key) REFERENCES users(scope_key)
                             ON DELETE CASCADE
                     );
@@ -88,10 +94,48 @@ class MemoryStore:
                         "INSERT INTO schema_meta(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
+                elif int(row["version"]) == 1:
+                    await connection.execute(
+                        "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'"
+                    )
+                    await connection.execute(
+                        "ALTER TABLE notes ADD COLUMN source_batch_id TEXT"
+                    )
+                    await connection.execute(
+                        "UPDATE schema_meta SET version = ?",
+                        (SCHEMA_VERSION,),
+                    )
                 elif int(row["version"]) != SCHEMA_VERSION:
                     raise RuntimeError(
                         f"不支持的数据库版本: {row['version']}"
                     )
+                await connection.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS message_buffer (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scope_key TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        provider_id TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        batch_id TEXT,
+                        FOREIGN KEY(scope_key) REFERENCES users(scope_key)
+                            ON DELETE CASCADE
+                    );
+                    CREATE TABLE IF NOT EXISTS extraction_state (
+                        scope_key TEXT PRIMARY KEY,
+                        last_message_at TEXT,
+                        next_retry_at TEXT,
+                        processing_batch_id TEXT,
+                        last_error TEXT,
+                        last_extracted_at TEXT,
+                        FOREIGN KEY(scope_key) REFERENCES users(scope_key)
+                            ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_buffer_scope_batch
+                        ON message_buffer(scope_key, batch_id, created_at, id);
+                    """
+                )
                 await connection.commit()
             except Exception:
                 await connection.close()
@@ -195,6 +239,9 @@ class MemoryStore:
         scope_key: str,
         category: str,
         content: str,
+        *,
+        source: str = "manual",
+        source_batch_id: str | None = None,
     ) -> MemoryNote:
         normalized_content = normalize_content(content)
         normalized_category = normalize_category(category)
@@ -207,8 +254,9 @@ class MemoryStore:
                 cursor = await connection.execute(
                     """
                     INSERT INTO notes(
-                        scope_key, category, content, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?)
+                        scope_key, category, content, created_at, updated_at,
+                        source, source_batch_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         scope_key,
@@ -216,6 +264,8 @@ class MemoryStore:
                         normalized_content,
                         timestamp,
                         timestamp,
+                        "auto" if source == "auto" else "manual",
+                        source_batch_id,
                     ),
                 )
                 await connection.commit()
@@ -231,6 +281,8 @@ class MemoryStore:
             content=normalized_content,
             created_at=timestamp,
             updated_at=timestamp,
+            source="auto" if source == "auto" else "manual",
+            source_batch_id=source_batch_id,
         )
 
     async def get_note(
@@ -250,7 +302,8 @@ class MemoryStore:
     ) -> MemoryNote | None:
         cursor = await connection.execute(
             """
-            SELECT id, scope_key, category, content, created_at, updated_at
+            SELECT id, scope_key, category, content, created_at, updated_at,
+                   source, source_batch_id
             FROM notes
             WHERE scope_key = ? AND id = ?
             """,
@@ -298,7 +351,8 @@ class MemoryStore:
 
             cursor = await connection.execute(
                 f"""
-                SELECT id, scope_key, category, content, created_at, updated_at
+                SELECT id, scope_key, category, content, created_at, updated_at,
+                       source, source_batch_id
                 FROM notes
                 WHERE {where}
                 ORDER BY updated_at DESC, id DESC
@@ -321,7 +375,8 @@ class MemoryStore:
             connection = self._require_connection()
             cursor = await connection.execute(
                 """
-                SELECT id, scope_key, category, content, created_at, updated_at
+                SELECT id, scope_key, category, content, created_at, updated_at,
+                       source, source_batch_id
                 FROM notes
                 WHERE scope_key = ?
                 ORDER BY updated_at DESC, id DESC
@@ -377,6 +432,223 @@ class MemoryStore:
             await cursor.close()
             return changed
 
+    async def append_buffer_message(
+        self,
+        scope_key: str,
+        role: str,
+        content: str,
+        provider_id: str = "",
+        *,
+        now: datetime | None = None,
+    ) -> BufferedMessage:
+        cleaned = str(content or "").strip()
+        if role not in {"user", "assistant"} or not cleaned:
+            raise ValueError("缓冲消息无效")
+        timestamp = (now or datetime.now(UTC)).isoformat(timespec="microseconds")
+        async with self._lock:
+            connection = self._require_connection()
+            if not await self._user_exists(connection, scope_key):
+                raise ValueError("用户不存在")
+            cursor = await connection.execute(
+                """
+                INSERT INTO message_buffer(
+                    scope_key, role, content, provider_id, created_at, batch_id
+                ) VALUES (?, ?, ?, ?, ?, NULL)
+                """,
+                (scope_key, role, cleaned, str(provider_id or ""), timestamp),
+            )
+            await connection.execute(
+                """
+                INSERT INTO extraction_state(scope_key, last_message_at)
+                VALUES (?, ?)
+                ON CONFLICT(scope_key) DO UPDATE SET
+                    last_message_at=excluded.last_message_at,
+                    last_error=NULL
+                """,
+                (scope_key, timestamp),
+            )
+            await connection.commit()
+            message_id = int(cursor.lastrowid or 0)
+            await cursor.close()
+        return BufferedMessage(
+            id=message_id,
+            scope_key=scope_key,
+            role=role,
+            content=cleaned,
+            provider_id=str(provider_id or ""),
+            created_at=timestamp,
+        )
+
+    async def get_extraction_status(self, scope_key: str) -> ExtractionStatus:
+        async with self._lock:
+            connection = self._require_connection()
+            cursor = await connection.execute(
+                """
+                SELECT
+                    s.scope_key, s.last_message_at, s.next_retry_at,
+                    s.processing_batch_id, s.last_error, s.last_extracted_at,
+                    COUNT(b.id) AS pending_count
+                FROM extraction_state AS s
+                LEFT JOIN message_buffer AS b
+                    ON b.scope_key = s.scope_key AND b.batch_id IS NULL
+                WHERE s.scope_key = ?
+                GROUP BY s.scope_key
+                """,
+                (scope_key,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+        if row is None:
+            return ExtractionStatus(scope_key, 0, None, None, None, None, None)
+        return self._status_from_row(row)
+
+    async def list_extraction_statuses_with_pending(
+        self,
+    ) -> list[ExtractionStatus]:
+        async with self._lock:
+            connection = self._require_connection()
+            cursor = await connection.execute(
+                """
+                SELECT
+                    s.scope_key, s.last_message_at, s.next_retry_at,
+                    s.processing_batch_id, s.last_error, s.last_extracted_at,
+                    COUNT(b.id) AS pending_count
+                FROM extraction_state AS s
+                JOIN message_buffer AS b
+                    ON b.scope_key = s.scope_key AND b.batch_id IS NULL
+                GROUP BY s.scope_key
+                HAVING COUNT(b.id) > 0
+                """
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [self._status_from_row(row) for row in rows]
+
+    async def claim_extraction_batch(
+        self,
+        scope_key: str,
+        *,
+        message_threshold: int,
+        idle_before: datetime | None,
+        now: datetime | None = None,
+    ) -> ExtractionBatch | None:
+        current = now or datetime.now(UTC)
+        async with self._lock:
+            connection = self._require_connection()
+            state_cursor = await connection.execute(
+                """
+                SELECT last_message_at, next_retry_at, processing_batch_id
+                FROM extraction_state WHERE scope_key = ?
+                """,
+                (scope_key,),
+            )
+            state = await state_cursor.fetchone()
+            await state_cursor.close()
+            if state is None or state["processing_batch_id"]:
+                return None
+            if state["next_retry_at"]:
+                retry_at = datetime.fromisoformat(state["next_retry_at"])
+                if retry_at > current:
+                    return None
+
+            cursor = await connection.execute(
+                """
+                SELECT id, scope_key, role, content, provider_id, created_at,
+                       batch_id
+                FROM message_buffer
+                WHERE scope_key = ? AND batch_id IS NULL
+                ORDER BY created_at ASC, id ASC
+                """,
+                (scope_key,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            enough_messages = len(rows) >= max(1, int(message_threshold))
+            idle_reached = bool(
+                rows
+                and idle_before is not None
+                and datetime.fromisoformat(rows[-1]["created_at"]) <= idle_before
+            )
+            if not rows or not (enough_messages or idle_reached):
+                return None
+
+            batch_id = uuid4().hex
+            ids = [int(row["id"]) for row in rows]
+            placeholders = ",".join("?" for _ in ids)
+            await connection.execute(
+                f"UPDATE message_buffer SET batch_id = ? WHERE id IN ({placeholders})",
+                [batch_id, *ids],
+            )
+            await connection.execute(
+                """
+                UPDATE extraction_state
+                SET processing_batch_id = ?, next_retry_at = NULL
+                WHERE scope_key = ?
+                """,
+                (batch_id, scope_key),
+            )
+            await connection.commit()
+        return ExtractionBatch(
+            batch_id=batch_id,
+            scope_key=scope_key,
+            messages=tuple(self._buffer_from_row(row, batch_id) for row in rows),
+        )
+
+    async def complete_extraction_batch(
+        self,
+        scope_key: str,
+        batch_id: str,
+    ) -> None:
+        timestamp = _now()
+        async with self._lock:
+            connection = self._require_connection()
+            await connection.execute(
+                "DELETE FROM message_buffer WHERE scope_key = ? AND batch_id = ?",
+                (scope_key, batch_id),
+            )
+            await connection.execute(
+                """
+                UPDATE extraction_state
+                SET processing_batch_id = NULL, next_retry_at = NULL,
+                    last_error = NULL, last_extracted_at = ?
+                WHERE scope_key = ? AND processing_batch_id = ?
+                """,
+                (timestamp, scope_key, batch_id),
+            )
+            await connection.commit()
+
+    async def fail_extraction_batch(
+        self,
+        scope_key: str,
+        batch_id: str,
+        error: str,
+        retry_at: datetime,
+    ) -> None:
+        async with self._lock:
+            connection = self._require_connection()
+            await connection.execute(
+                """
+                UPDATE message_buffer SET batch_id = NULL
+                WHERE scope_key = ? AND batch_id = ?
+                """,
+                (scope_key, batch_id),
+            )
+            await connection.execute(
+                """
+                UPDATE extraction_state
+                SET processing_batch_id = NULL, next_retry_at = ?,
+                    last_error = ?
+                WHERE scope_key = ? AND processing_batch_id = ?
+                """,
+                (
+                    retry_at.isoformat(timespec="microseconds"),
+                    str(error)[:500],
+                    scope_key,
+                    batch_id,
+                ),
+            )
+            await connection.commit()
+
     @staticmethod
     def _note_from_row(row: aiosqlite.Row) -> MemoryNote:
         return MemoryNote(
@@ -386,4 +658,33 @@ class MemoryStore:
             content=row["content"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            source=row["source"],
+            source_batch_id=row["source_batch_id"],
+        )
+
+    @staticmethod
+    def _buffer_from_row(
+        row: aiosqlite.Row,
+        batch_id: str | None = None,
+    ) -> BufferedMessage:
+        return BufferedMessage(
+            id=int(row["id"]),
+            scope_key=row["scope_key"],
+            role=row["role"],
+            content=row["content"],
+            provider_id=row["provider_id"],
+            created_at=row["created_at"],
+            batch_id=batch_id if batch_id is not None else row["batch_id"],
+        )
+
+    @staticmethod
+    def _status_from_row(row: aiosqlite.Row) -> ExtractionStatus:
+        return ExtractionStatus(
+            scope_key=row["scope_key"],
+            pending_count=int(row["pending_count"]),
+            last_message_at=row["last_message_at"],
+            next_retry_at=row["next_retry_at"],
+            processing_batch_id=row["processing_batch_id"],
+            last_error=row["last_error"],
+            last_extracted_at=row["last_extracted_at"],
         )
