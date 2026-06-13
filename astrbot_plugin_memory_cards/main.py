@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.agent.message import TextPart
+from quart import jsonify, request
 
 from .injection import build_memory_context
 from .retrieval import select_relevant_notes
@@ -160,16 +163,127 @@ class MemoryCardsPlugin(Star):
             )
 
     async def api_users(self):
-        return {"ok": False, "message": "尚未实现"}
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        try:
+            users = await self.store.list_users()
+        except Exception:
+            logger.exception("读取便签用户失败")
+            return self._error("读取用户列表失败", 500)
+        return jsonify({"ok": True, "data": [asdict(user) for user in users]})
 
     async def api_notes(self):
-        return {"ok": False, "message": "尚未实现"}
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        scope_key = str(request.args.get("scope_key", "")).strip()
+        if not scope_key:
+            return self._error("缺少 scope_key", 400)
+        try:
+            limit = int(request.args.get("limit", 50))
+            offset = int(request.args.get("offset", 0))
+        except (TypeError, ValueError):
+            return self._error("分页参数无效", 400)
+        try:
+            notes, total = await self.store.list_notes(
+                scope_key,
+                keyword=str(request.args.get("keyword", "")),
+                category=request.args.get("category"),
+                limit=limit,
+                offset=offset,
+            )
+        except Exception:
+            logger.exception("读取便签失败")
+            return self._error("读取便签失败", 500)
+        return jsonify(
+            {
+                "ok": True,
+                "data": [asdict(note) for note in notes],
+                "total": total,
+            }
+        )
 
     async def api_create_note(self):
-        return {"ok": False, "message": "尚未实现"}
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        payload = await self._json_payload()
+        if payload is None:
+            return self._error("请求内容必须是 JSON 对象", 400)
+        scope_key = str(payload.get("scope_key", "")).strip()
+        if not scope_key:
+            return self._error("缺少 scope_key", 400)
+        try:
+            if not await self.store.user_exists(scope_key):
+                return self._error("用户不存在", 404)
+            note = await self.store.create_note(
+                scope_key,
+                str(payload.get("category", "其他")),
+                str(payload.get("content", "")),
+            )
+        except ValueError as exc:
+            return self._error(str(exc), 400)
+        except Exception:
+            logger.exception("新增便签失败")
+            return self._error("新增便签失败", 500)
+        return jsonify({"ok": True, "data": asdict(note)})
 
     async def api_update_note(self):
-        return {"ok": False, "message": "尚未实现"}
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        payload = await self._json_payload()
+        if payload is None:
+            return self._error("请求内容必须是 JSON 对象", 400)
+        scope_key = str(payload.get("scope_key", "")).strip()
+        note_id = self._parse_note_id(payload.get("id"))
+        if not scope_key or note_id is None:
+            return self._error("scope_key 或便签 ID 无效", 400)
+        try:
+            note = await self.store.update_note(
+                scope_key,
+                note_id,
+                str(payload.get("category", "其他")),
+                str(payload.get("content", "")),
+            )
+        except ValueError as exc:
+            return self._error(str(exc), 400)
+        except Exception:
+            logger.exception("更新便签失败")
+            return self._error("更新便签失败", 500)
+        if note is None:
+            return self._error("便签不存在或不属于该用户", 404)
+        return jsonify({"ok": True, "data": asdict(note)})
 
     async def api_delete_note(self):
-        return {"ok": False, "message": "尚未实现"}
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        payload = await self._json_payload()
+        if payload is None:
+            return self._error("请求内容必须是 JSON 对象", 400)
+        scope_key = str(payload.get("scope_key", "")).strip()
+        note_id = self._parse_note_id(payload.get("id"))
+        if not scope_key or note_id is None:
+            return self._error("scope_key 或便签 ID 无效", 400)
+        try:
+            deleted = await self.store.delete_note(scope_key, note_id)
+        except Exception:
+            logger.exception("删除便签失败")
+            return self._error("删除便签失败", 500)
+        if not deleted:
+            return self._error("便签不存在或不属于该用户", 404)
+        return jsonify({"ok": True})
+
+    @staticmethod
+    async def _json_payload() -> dict | None:
+        payload = await request.get_json(silent=True)
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _parse_note_id(value) -> int | None:
+        try:
+            note_id = int(value)
+        except (TypeError, ValueError):
+            return None
+        return note_id if note_id > 0 else None
+
+    @staticmethod
+    def _error(message: str, status: int):
+        return jsonify({"ok": False, "message": message}), status
