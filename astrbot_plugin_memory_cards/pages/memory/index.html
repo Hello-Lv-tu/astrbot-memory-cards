@@ -7,7 +7,121 @@
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <main id="app">对话便签</main>
+    <main class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">VISIBLE MEMORY</p>
+          <h1>对话便签</h1>
+          <p class="subtitle">整理 AI 可以自然参考的长期信息</p>
+        </div>
+        <button id="new-note" class="primary-button" type="button">
+          <span aria-hidden="true">＋</span>
+          新建便签
+        </button>
+      </header>
+
+      <section class="toolbar" aria-label="便签筛选">
+        <label class="field user-field">
+          <span>私聊用户</span>
+          <select id="user-select" aria-label="选择私聊用户"></select>
+        </label>
+        <label class="field search-field">
+          <span>搜索</span>
+          <input
+            id="search-input"
+            type="search"
+            placeholder="搜索便签内容"
+            autocomplete="off"
+          />
+        </label>
+        <div class="summary">
+          <strong id="note-count">0</strong>
+          <span>条便签</span>
+        </div>
+      </section>
+
+      <nav id="category-list" class="categories" aria-label="便签分类">
+        <button class="category-chip active" data-category="全部" type="button">全部</button>
+        <button class="category-chip" data-category="偏好" type="button">偏好</button>
+        <button class="category-chip" data-category="习惯" type="button">习惯</button>
+        <button class="category-chip" data-category="人物" type="button">人物</button>
+        <button class="category-chip" data-category="事件" type="button">事件</button>
+        <button class="category-chip" data-category="雷区" type="button">雷区</button>
+        <button class="category-chip" data-category="目标" type="button">目标</button>
+        <button class="category-chip" data-category="待办" type="button">待办</button>
+        <button class="category-chip" data-category="其他" type="button">其他</button>
+      </nav>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <section id="note-grid" class="note-grid" aria-label="便签列表"></section>
+      <section id="empty-state" class="empty-state" hidden>
+        <div class="empty-icon" aria-hidden="true">✦</div>
+        <h2>这里还没有便签</h2>
+        <p>选择一个私聊用户，然后记录值得长期记住的信息。</p>
+      </section>
+    </main>
+
+    <dialog id="note-dialog" class="modal">
+      <form id="note-form" method="dialog">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow">MEMORY CARD</p>
+            <h2 id="dialog-title">新建便签</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭" type="submit">×</button>
+        </div>
+        <input id="note-id" type="hidden" />
+        <label class="field">
+          <span>分类</span>
+          <select id="note-category">
+            <option>偏好</option>
+            <option>习惯</option>
+            <option>人物</option>
+            <option>事件</option>
+            <option>雷区</option>
+            <option>目标</option>
+            <option>待办</option>
+            <option>其他</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>便签内容</span>
+          <textarea
+            id="note-content"
+            rows="7"
+            maxlength="2000"
+            placeholder="例如：用户喜欢简洁、直接但不冷淡的回答。"
+            required
+          ></textarea>
+        </label>
+        <div class="character-count"><span id="content-count">0</span>/2000</div>
+        <div class="modal-actions">
+          <button class="secondary-button" value="cancel" type="submit">取消</button>
+          <button id="save-note" class="primary-button" value="default" type="submit">
+            保存便签
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-dialog" class="modal confirm-modal">
+      <form method="dialog">
+        <div class="modal-heading">
+          <div>
+            <p class="eyebrow danger">DELETE</p>
+            <h2>删除这张便签？</h2>
+          </div>
+        </div>
+        <p>删除后无法恢复，但不会影响已经产生的聊天记录。</p>
+        <div class="modal-actions">
+          <button class="secondary-button" value="cancel" type="submit">保留</button>
+          <button id="confirm-delete" class="danger-button" value="default" type="submit">
+            确认删除
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="./app.js"></script>
   </body>
 </html>
