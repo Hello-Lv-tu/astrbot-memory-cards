@@ -45,9 +45,25 @@ class FakeStarTools:
 class FakeContext:
     def __init__(self) -> None:
         self.routes: list[tuple[str, object, list[str], str]] = []
+        self.provider_id = "provider-a"
+        self.llm_responses = []
+        self.llm_calls = []
 
     def register_web_api(self, route, handler, methods, desc) -> None:
         self.routes.append((route, handler, methods, desc))
+
+    async def get_current_chat_provider_id(self, umo: str) -> str:
+        del umo
+        return self.provider_id
+
+    async def llm_generate(self, **kwargs):
+        self.llm_calls.append(kwargs)
+        if self.llm_responses:
+            response = self.llm_responses.pop(0)
+            if isinstance(response, Exception):
+                raise response
+            return response
+        return types.SimpleNamespace(completion_text='{"memories": []}')
 
 
 class _Filter:
@@ -56,6 +72,10 @@ class _Filter:
 
     @staticmethod
     def on_llm_request():
+        return lambda function: function
+
+    @staticmethod
+    def on_agent_done():
         return lambda function: function
 
     @staticmethod

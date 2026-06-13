@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import UTC, datetime, timedelta
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -8,8 +9,15 @@ from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.core.agent.message import TextPart
 from quart import jsonify, request
 
+from .extraction import (
+    EXTRACTION_SYSTEM_PROMPT,
+    build_extraction_prompt,
+    normalize_for_duplicate_check,
+    parse_candidates,
+)
 from .injection import build_memory_context
 from .retrieval import select_relevant_notes
+from .scheduler import ExtractionScheduler
 from .store import MemoryStore
 
 PLUGIN_NAME = "astrbot_plugin_memory_cards"
@@ -23,6 +31,16 @@ class MemoryCardsPlugin(Star):
         self.config = config
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
         self.store = MemoryStore(self.data_dir / "memory.db")
+        self.scheduler = ExtractionScheduler(
+            self.store,
+            self.process_extraction_scope,
+            message_threshold=lambda: self._config_int(
+                "auto_extract_message_threshold", 20, 1, 500
+            ),
+            idle_minutes=lambda: self._config_int(
+                "auto_extract_idle_minutes", 30, 1, 1440
+            ),
+        )
         self._active = False
         self._register_web_apis(context)
 
@@ -65,9 +83,12 @@ class MemoryCardsPlugin(Star):
             self._active = False
             return
         self._active = True
+        if bool(self.config.get("auto_extract_enabled", True)):
+            await self.scheduler.start()
 
     async def terminate(self) -> None:
         self._active = False
+        await self.scheduler.stop()
         close = getattr(self.store, "close", None)
         if close is None:
             return
@@ -105,8 +126,130 @@ class MemoryCardsPlugin(Star):
                 user_id,
                 event.get_sender_name(),
             )
+            if bool(self.config.get("auto_extract_enabled", True)):
+                message = str(event.get_message_str() or "").strip()
+                if message:
+                    await self.store.append_buffer_message(
+                        scope_key,
+                        "user",
+                        message,
+                    )
         except Exception:
             logger.exception("登记私聊用户失败")
+
+    @filter.on_agent_done()
+    async def buffer_final_reply(self, event, run_context, resp) -> None:
+        del run_context
+        if (
+            not self._active
+            or not bool(self.config.get("auto_extract_enabled", True))
+            or not event.is_private_chat()
+            or getattr(resp, "role", "") == "err"
+        ):
+            return
+        identity = self._scope_from_event(event)
+        content = str(getattr(resp, "completion_text", "") or "").strip()
+        if identity is None or not content:
+            return
+        provider_id = ""
+        try:
+            provider_id = await self.context.get_current_chat_provider_id(
+                event.unified_msg_origin
+            )
+        except Exception:
+            logger.warning("无法确定当前会话模型，便签整理时将重试")
+        try:
+            await self.store.append_buffer_message(
+                identity[0],
+                "assistant",
+                content,
+                provider_id,
+            )
+        except Exception:
+            logger.exception("缓冲机器人回复失败")
+
+    async def process_extraction_scope(self, scope_key: str) -> None:
+        now = datetime.now(UTC)
+        batch = await self.store.claim_extraction_batch(
+            scope_key,
+            message_threshold=self._config_int(
+                "auto_extract_message_threshold", 20, 1, 500
+            ),
+            idle_before=now
+            - timedelta(
+                minutes=self._config_int(
+                    "auto_extract_idle_minutes", 30, 1, 1440
+                )
+            ),
+            now=now,
+        )
+        if batch is None:
+            return
+        try:
+            provider_id = str(
+                self.config.get("auto_extract_provider_id", "") or ""
+            ).strip()
+            if not provider_id:
+                provider_id = next(
+                    (
+                        message.provider_id
+                        for message in reversed(batch.messages)
+                        if message.provider_id
+                    ),
+                    "",
+                )
+            if not provider_id:
+                raise RuntimeError("没有可用于整理便签的模型")
+
+            existing = await self.store.list_notes_for_retrieval(scope_key)
+            response = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=build_extraction_prompt(batch.messages, existing),
+                system_prompt=EXTRACTION_SYSTEM_PROMPT,
+            )
+            candidates = parse_candidates(
+                getattr(response, "completion_text", ""),
+                max_notes=self._config_int(
+                    "auto_extract_max_notes", 5, 1, 20
+                ),
+            )
+            known = {
+                normalize_for_duplicate_check(note.content) for note in existing
+            }
+            for candidate in candidates:
+                normalized = normalize_for_duplicate_check(candidate.content)
+                if candidate.action == "create":
+                    if normalized in known:
+                        continue
+                    await self.store.create_note(
+                        scope_key,
+                        candidate.category,
+                        candidate.content,
+                        source="auto",
+                        source_batch_id=batch.batch_id,
+                    )
+                    known.add(normalized)
+                elif candidate.note_id is not None:
+                    await self.store.update_note(
+                        scope_key,
+                        candidate.note_id,
+                        candidate.category,
+                        candidate.content,
+                    )
+            await self.store.complete_extraction_batch(scope_key, batch.batch_id)
+        except Exception as exc:
+            logger.exception("自动整理对话便签失败")
+            await self.store.fail_extraction_batch(
+                scope_key,
+                batch.batch_id,
+                str(exc),
+                now
+                + timedelta(
+                    minutes=self._config_int(
+                        "auto_extract_retry_minutes", 10, 1, 1440
+                    )
+                ),
+            )
 
     @filter.on_llm_request()
     async def inject_memory(self, event: AstrMessageEvent, req) -> None:
@@ -291,3 +434,16 @@ class MemoryCardsPlugin(Star):
                 "message": message,
             }
         )
+
+    def _config_int(
+        self,
+        key: str,
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            value = int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(value, maximum))

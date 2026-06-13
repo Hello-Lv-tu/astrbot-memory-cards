@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -26,6 +27,7 @@ class FakeEvent:
         self.sender_id = sender_id
         self.sender_name = sender_name
         self.message = message
+        self.unified_msg_origin = f"{platform_id}:{sender_id}"
 
     def is_private_chat(self) -> bool:
         return self.private
@@ -64,6 +66,12 @@ async def plugin(tmp_path):
             "max_injected_chars": 1500,
             "minimum_score": 3,
             "recall_fallback_enabled": True,
+            "auto_extract_enabled": True,
+            "auto_extract_message_threshold": 1,
+            "auto_extract_idle_minutes": 30,
+            "auto_extract_retry_minutes": 10,
+            "auto_extract_max_notes": 5,
+            "auto_extract_provider_id": "",
         },
     )
     await instance.initialize()
@@ -169,3 +177,71 @@ async def test_old_matching_note_beyond_first_hundred_is_injected(plugin) -> Non
 
     assert len(request.extra_user_content_parts) == 1
     assert "用户的猫叫月饼" in request.extra_user_content_parts[0].text
+
+
+@pytest.mark.asyncio
+async def test_private_messages_and_final_reply_are_buffered(plugin) -> None:
+    event = FakeEvent(message="我喜欢安静")
+    await plugin.observe_private_user(event)
+    await plugin.buffer_final_reply(
+        event,
+        SimpleNamespace(),
+        SimpleNamespace(role="assistant", completion_text="好的"),
+    )
+
+    status = await plugin.store.get_extraction_status("platform\x1fuser")
+    assert status.pending_count == 2
+
+
+@pytest.mark.asyncio
+async def test_extraction_creates_auto_note_and_skips_duplicate(plugin) -> None:
+    event = FakeEvent(message="我喜欢安静")
+    await plugin.observe_private_user(event)
+    await plugin.buffer_final_reply(
+        event,
+        SimpleNamespace(),
+        SimpleNamespace(role="assistant", completion_text="好的"),
+    )
+    plugin.context.llm_responses.append(
+        SimpleNamespace(
+            completion_text=(
+                '{"memories":[{"action":"create","category":"偏好",'
+                '"content":"用户喜欢安静"}]}'
+            )
+        )
+    )
+
+    await plugin.process_extraction_scope("platform\x1fuser")
+    notes, _ = await plugin.store.list_notes("platform\x1fuser")
+    assert len(notes) == 1
+
+
+@pytest.mark.asyncio
+async def test_extraction_uses_configured_provider_and_retries_failure(plugin) -> None:
+    event = FakeEvent(message="我在准备考试")
+    await plugin.observe_private_user(event)
+    plugin.config["auto_extract_provider_id"] = "cheap-provider"
+    plugin.context.llm_responses.append(RuntimeError("provider unavailable"))
+
+    await plugin.process_extraction_scope("platform\x1fuser")
+
+    status = await plugin.store.get_extraction_status("platform\x1fuser")
+    assert plugin.context.llm_calls[0]["chat_provider_id"] == "cheap-provider"
+    assert status.pending_count == 1
+    assert status.next_retry_at is not None
+    assert notes[0].source == "auto"
+
+    await plugin.store.append_buffer_message(
+        "platform\x1fuser", "user", "我还是喜欢安静", "provider-a"
+    )
+    plugin.context.llm_responses.append(
+        SimpleNamespace(
+            completion_text=(
+                '{"memories":[{"action":"create","category":"偏好",'
+                '"content":"用户喜欢安静"}]}'
+            )
+        )
+    )
+    await plugin.process_extraction_scope("platform\x1fuser")
+    notes, _ = await plugin.store.list_notes("platform\x1fuser")
+    assert len(notes) == 1

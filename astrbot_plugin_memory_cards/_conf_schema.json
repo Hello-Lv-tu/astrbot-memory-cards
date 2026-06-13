@@ -23,5 +23,35 @@
     "type": "bool",
     "description": "明确询问记忆时返回最近便签",
     "default": true
+  },
+  "auto_extract_enabled": {
+    "type": "bool",
+    "description": "启用私聊自动整理便签",
+    "default": true
+  },
+  "auto_extract_idle_minutes": {
+    "type": "int",
+    "description": "最后一条消息后空闲多少分钟触发整理",
+    "default": 30
+  },
+  "auto_extract_message_threshold": {
+    "type": "int",
+    "description": "累计多少条用户和机器人消息触发整理",
+    "default": 20
+  },
+  "auto_extract_provider_id": {
+    "type": "string",
+    "description": "可选的便签整理模型提供商 ID，留空使用当前会话模型",
+    "default": ""
+  },
+  "auto_extract_max_notes": {
+    "type": "int",
+    "description": "单次整理最多新增或更新的便签数",
+    "default": 5
+  },
+  "auto_extract_retry_minutes": {
+    "type": "int",
+    "description": "整理失败后的重试间隔（分钟）",
+    "default": 10
   }
 }

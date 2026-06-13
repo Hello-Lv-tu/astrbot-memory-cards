@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
-from typing import Awaitable, Callable
 
 from .store import MemoryStore
 
@@ -43,8 +43,8 @@ class ExtractionScheduler:
 
     async def _run(self) -> None:
         while True:
-            await self.check_once()
             await asyncio.sleep(self.poll_seconds)
+            await self.check_once()
 
     async def check_once(self) -> None:
         current = self.now()
