@@ -146,6 +146,7 @@ async def test_store_failure_does_not_block_request(plugin) -> None:
         async def list_notes(self, *args, **kwargs):
             raise RuntimeError("database unavailable")
 
+    await plugin.store.close()
     plugin.store = BrokenStore()
     request = FakeRequest()
 

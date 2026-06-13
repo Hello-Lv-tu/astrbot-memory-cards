@@ -22,6 +22,8 @@ def test_plugin_package_contract() -> None:
         "pages/memory/index.html",
         "pages/memory/app.js",
         "pages/memory/style.css",
+        ".astrbot-plugin/i18n/zh-CN.json",
+        ".astrbot-plugin/i18n/en-US.json",
     }
     assert expected_files <= {
         str(path.relative_to(PLUGIN)).replace("\\", "/")
