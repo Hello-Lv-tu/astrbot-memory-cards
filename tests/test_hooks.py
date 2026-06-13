@@ -214,21 +214,6 @@ async def test_extraction_creates_auto_note_and_skips_duplicate(plugin) -> None:
     await plugin.process_extraction_scope("platform\x1fuser")
     notes, _ = await plugin.store.list_notes("platform\x1fuser")
     assert len(notes) == 1
-
-
-@pytest.mark.asyncio
-async def test_extraction_uses_configured_provider_and_retries_failure(plugin) -> None:
-    event = FakeEvent(message="我在准备考试")
-    await plugin.observe_private_user(event)
-    plugin.config["auto_extract_provider_id"] = "cheap-provider"
-    plugin.context.llm_responses.append(RuntimeError("provider unavailable"))
-
-    await plugin.process_extraction_scope("platform\x1fuser")
-
-    status = await plugin.store.get_extraction_status("platform\x1fuser")
-    assert plugin.context.llm_calls[0]["chat_provider_id"] == "cheap-provider"
-    assert status.pending_count == 1
-    assert status.next_retry_at is not None
     assert notes[0].source == "auto"
 
     await plugin.store.append_buffer_message(
@@ -245,3 +230,18 @@ async def test_extraction_uses_configured_provider_and_retries_failure(plugin) -
     await plugin.process_extraction_scope("platform\x1fuser")
     notes, _ = await plugin.store.list_notes("platform\x1fuser")
     assert len(notes) == 1
+
+
+@pytest.mark.asyncio
+async def test_extraction_uses_configured_provider_and_retries_failure(plugin) -> None:
+    event = FakeEvent(message="我在准备考试")
+    await plugin.observe_private_user(event)
+    plugin.config["auto_extract_provider_id"] = "cheap-provider"
+    plugin.context.llm_responses.append(RuntimeError("provider unavailable"))
+
+    await plugin.process_extraction_scope("platform\x1fuser")
+
+    status = await plugin.store.get_extraction_status("platform\x1fuser")
+    assert plugin.context.llm_calls[0]["chat_provider_id"] == "cheap-provider"
+    assert status.pending_count == 1
+    assert status.next_retry_at is not None
