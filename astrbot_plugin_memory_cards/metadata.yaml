@@ -2,7 +2,7 @@ name: astrbot_plugin_memory_cards
 display_name: 对话便签
 desc: 为私聊用户维护可见的长期记忆卡片，并按相关性临时提供给模型。
 short_desc: 私聊长期记忆卡片与后台管理页面。
-version: v0.1.0
+version: v0.2.0
 author: Lv_Tu
 repo: "https://github.com/Hello-Lv-tu/astrbot-memory-cards"
 astrbot_version: ">=4.25.5,<5"

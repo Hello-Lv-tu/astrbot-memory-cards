@@ -24,7 +24,7 @@ PLUGIN_NAME = "astrbot_plugin_memory_cards"
 SCOPE_SEPARATOR = "\x1f"
 
 
-@register(PLUGIN_NAME, "Lv_Tu", "私聊长期记忆卡片", "0.1.0")
+@register(PLUGIN_NAME, "Lv_Tu", "私聊长期记忆卡片", "0.2.0")
 class MemoryCardsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
