@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import pytest
@@ -49,6 +50,9 @@ def test_all_web_api_routes_are_namespaced(api_plugin) -> None:
         "/astrbot_plugin_memory_cards/memory/notes/create",
         "/astrbot_plugin_memory_cards/memory/notes/update",
         "/astrbot_plugin_memory_cards/memory/notes/delete",
+        "/astrbot_plugin_memory_cards/memory/quality/preview",
+        "/astrbot_plugin_memory_cards/memory/quality/apply",
+        "/astrbot_plugin_memory_cards/memory/history",
     }
 
 
@@ -182,3 +186,122 @@ async def test_inactive_store_returns_503(api_plugin) -> None:
     assert body["status"] == "error"
     assert body["code"] == 503
     assert "未就绪" in body["message"]
+
+
+@pytest.mark.asyncio
+async def test_quality_preview_apply_and_history_api(api_plugin) -> None:
+    plugin, context = api_plugin
+    app = Quart(__name__)
+    first = await plugin.store.create_note("pu1", "目标", "用户在准备考试")
+    second = await plugin.store.create_note("pu1", "目标", "用户备考英语")
+    context.llm_responses.append(
+        SimpleNamespace(
+            completion_text=(
+                '{"memories":[{"action":"merge","note_ids":['
+                f"{first.id},{second.id}"
+                '],"category":"目标","content":"用户在准备英语考试",'
+                '"reason":"近义目标"}]}'
+            )
+        )
+    )
+    plugin.config["auto_extract_provider_id"] = "quality-provider"
+
+    status, preview = await call_handler(
+        app,
+        plugin.api_quality_preview,
+        method="POST",
+        json={"scope_key": "pu1"},
+    )
+    assert status == 200
+    assert preview["ok"] is True
+    assert preview["preview"]["fingerprint"]
+    assert preview["preview"]["items"][0]["action"] == "merge"
+    assert {first.id, second.id} == set(preview["preview"]["items"][0]["note_ids"])
+    assert {item["content"] for item in preview["preview"]["items"][0]["before"]} == {
+        "用户在准备考试",
+        "用户备考英语",
+    }
+
+    status, applied = await call_handler(
+        app,
+        plugin.api_quality_apply,
+        method="POST",
+        json={"scope_key": "pu1", "preview_id": preview["preview"]["preview_id"]},
+    )
+    assert status == 200
+    assert applied["ok"] is True
+    assert applied["notes"][0]["content"] == "用户在准备英语考试"
+
+    status, history = await call_handler(
+        app,
+        plugin.api_history,
+        path="/?" + urlencode({"scope_key": "pu1"}),
+    )
+    assert status == 200
+    assert history["ok"] is True
+    assert len(history["items"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_quality_apply_rejects_stale_preview(api_plugin) -> None:
+    plugin, context = api_plugin
+    app = Quart(__name__)
+    first = await plugin.store.create_note("pu1", "目标", "用户在准备考试")
+    second = await plugin.store.create_note("pu1", "目标", "用户备考英语")
+    context.llm_responses.append(
+        SimpleNamespace(
+            completion_text=(
+                '{"memories":[{"action":"merge","note_ids":['
+                f"{first.id},{second.id}"
+                '],"category":"目标","content":"用户在准备英语考试"}]}'
+            )
+        )
+    )
+    plugin.config["auto_extract_provider_id"] = "quality-provider"
+    _, preview = await call_handler(
+        app,
+        plugin.api_quality_preview,
+        method="POST",
+        json={"scope_key": "pu1"},
+    )
+    await plugin.store.create_note("pu1", "偏好", "用户喜欢安静")
+
+    status, body = await call_handler(
+        app,
+        plugin.api_quality_apply,
+        method="POST",
+        json={"scope_key": "pu1", "preview_id": preview["preview"]["preview_id"]},
+    )
+
+    assert status == 200
+    assert body["ok"] is False
+    assert body["code"] == 409
+    assert "重新生成" in body["message"]
+
+
+@pytest.mark.asyncio
+async def test_quality_preview_does_not_merge_unrelated_same_category_notes(
+    api_plugin,
+) -> None:
+    plugin, context = api_plugin
+    app = Quart(__name__)
+    await plugin.store.create_note("pu1", "偏好", "用户喜欢绿豆粥")
+    await plugin.store.create_note("pu1", "偏好", "用户喜欢养成类小说")
+    context.llm_responses.append(
+        SimpleNamespace(
+            completion_text='{"memories":[{"action":"noop","reason":"语义无关"}]}'
+        )
+    )
+    plugin.config["auto_extract_provider_id"] = "quality-provider"
+
+    status, preview = await call_handler(
+        app,
+        plugin.api_quality_preview,
+        method="POST",
+        json={"scope_key": "pu1"},
+    )
+
+    assert status == 200
+    assert preview["ok"] is True
+    assert preview["preview"]["items"] == []
+    assert context.llm_calls[-1]["chat_provider_id"] == "quality-provider"

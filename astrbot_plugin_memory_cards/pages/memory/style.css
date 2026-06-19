@@ -431,6 +431,55 @@ dialog::backdrop {
   line-height: 1.7;
 }
 
+.side-panel {
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.side-panel header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.side-panel h2,
+.quality-item h3,
+.history-item h3 {
+  margin: 0;
+}
+
+.quality-list,
+.history-list {
+  display: grid;
+  gap: 10px;
+}
+
+.panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.quality-item,
+.history-item {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--paper);
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 @media (max-width: 720px) {
   .page-shell {
     width: min(100% - 24px, 1280px);

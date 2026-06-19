@@ -18,6 +18,12 @@
           <span aria-hidden="true">＋</span>
           新建便签
         </button>
+        <button id="quality-button" class="secondary-button" type="button">
+          质量整理
+        </button>
+        <button id="history-button" class="secondary-button" type="button">
+          变更历史
+        </button>
       </header>
 
       <section class="toolbar" aria-label="便签筛选">
@@ -53,6 +59,23 @@
       </nav>
 
       <p id="status" class="status" role="status" aria-live="polite"></p>
+      <section id="quality-panel" class="side-panel" hidden>
+        <header>
+          <h2>质量整理预览</h2>
+          <p id="quality-fingerprint"></p>
+        </header>
+        <div id="quality-list" class="quality-list"></div>
+        <div class="panel-actions">
+          <button id="cancel-quality" class="secondary-button" type="button">取消</button>
+          <button id="apply-quality" class="primary-button" type="button">确认应用</button>
+        </div>
+      </section>
+      <section id="history-panel" class="side-panel" hidden>
+        <header>
+          <h2>变更历史</h2>
+        </header>
+        <div id="history-list" class="history-list"></div>
+      </section>
       <section id="note-grid" class="note-grid" aria-label="便签列表"></section>
       <section id="empty-state" class="empty-state" hidden>
         <div class="empty-icon" aria-hidden="true">✦</div>

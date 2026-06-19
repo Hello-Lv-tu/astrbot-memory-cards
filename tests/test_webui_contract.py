@@ -16,6 +16,9 @@ def test_page_uses_astrbot_bridge_and_relative_endpoints() -> None:
         "memory/notes/create",
         "memory/notes/update",
         "memory/notes/delete",
+        "memory/quality/preview",
+        "memory/quality/apply",
+        "memory/history",
     ):
         assert f'"{endpoint}"' in script
     assert "textContent" in script
@@ -39,6 +42,14 @@ def test_page_contains_management_controls_and_states() -> None:
         "note-dialog",
         "note-form",
         "delete-dialog",
+        "quality-button",
+        "history-button",
+        "quality-panel",
+        "quality-list",
+        "apply-quality",
+        "cancel-quality",
+        "history-panel",
+        "history-list",
         "status",
         "empty-state",
     ):
@@ -54,3 +65,15 @@ def test_page_is_responsive_and_theme_aware() -> None:
     assert "@media" in styles
     assert '[data-theme="dark"]' in styles
     assert "dialog" in styles
+
+
+def test_page_exposes_quality_cleanup_and_history_actions() -> None:
+    script = (PAGE / "app.js").read_text(encoding="utf-8")
+
+    assert "loadQualityPreview" in script
+    assert "applyQualityPreview" in script
+    assert "cancelQualityPreview" in script
+    assert "整理前" in script
+    assert "loadHistory" in script
+    assert "preview_id" in script
+    assert "fingerprint" in script

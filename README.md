@@ -14,6 +14,8 @@
 - `TextPart(...).mark_as_temp()` 本轮临时注入，不写入聊天历史
 - 用户与机器人消息按批次缓冲，默认累计 20 条或空闲 30 分钟后自动整理
 - 自动整理静默运行，支持使用当前会话模型或指定专用模型
+- 自动整理使用本地候选召回和结构化 create/update/merge/noop 判定，近义便签优先更新或合并
+- 后台使用整理模型生成质量预览，支持指纹过期保护、确认/取消和只读变更历史
 - 自动便签可在后台查看、修改和删除，并带有“自动生成”标识
 
 ## 安装
@@ -48,8 +50,10 @@ data/plugin_data/astrbot_plugin_memory_cards/
 - `auto_extract_enabled`：启用自动提取，默认开启
 - `auto_extract_idle_minutes`：空闲触发时间，默认 30 分钟
 - `auto_extract_message_threshold`：消息数触发阈值，默认 20 条
-- `auto_extract_provider_id`：可选专用整理模型 ID，留空使用当前会话模型
+- `auto_extract_provider_id`：可选专用整理模型 ID；留空时，自动提取使用当前会话模型，后台质量整理使用 AstrBot 默认模型
 - `auto_extract_max_notes`：单次最多新增或更新便签数，默认 5
+- `auto_extract_candidate_notes`：自动整理时提供给模型判定的本地候选便签数，默认 8
+- `auto_extract_candidate_minimum_score`：自动整理候选召回最低分，默认 0.5
 - `auto_extract_retry_minutes`：失败重试间隔，默认 10 分钟
 
 消息数和空闲时间是“或”关系，任一达到即整理。没有未处理的新消息时不会调用
@@ -59,6 +63,8 @@ data/plugin_data/astrbot_plugin_memory_cards/
 
 - 为自动整理暂存尚未处理的私聊文本；整理成功后删除对应缓冲批次。
 - 自动提取禁止保存密码、验证码、Cookie、令牌和 API 密钥等凭据。
+- 模型只能操作当前用户、当前候选集合内的便签 ID；非法输出会拒绝落库并等待重试。
+- 更新与合并会记录变更历史；合并保留最早创建的便签 ID。
 - 隔离键由 AstrBot 平台实例 ID 与发送者 ID 组成。
 - 便签被明确标记为不可信参考，不能覆盖当前用户消息。
 - WebUI 和接口复用 AstrBot Dashboard 登录鉴权，不新开端口。

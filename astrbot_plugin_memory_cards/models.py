@@ -49,6 +49,30 @@ class MemoryNote:
 
 
 @dataclass(frozen=True, slots=True)
+class NoteRevision:
+    id: int
+    scope_key: str
+    note_id: int
+    merged_note_id: int | None
+    before_category: str
+    before_content: str
+    change_type: str
+    reason: str
+    source_batch_id: str | None
+    created_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class QualityPreview:
+    preview_id: str
+    scope_key: str
+    fingerprint: str
+    operations: tuple[dict, ...]
+    created_at: str
+    expires_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class BufferedMessage:
     id: int
     scope_key: str

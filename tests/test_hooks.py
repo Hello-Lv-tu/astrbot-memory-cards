@@ -234,6 +234,77 @@ async def test_extraction_creates_auto_note_and_skips_duplicate(plugin) -> None:
 
 
 @pytest.mark.asyncio
+async def test_extraction_updates_and_merges_in_single_transaction(plugin) -> None:
+    event = FakeEvent(message="我现在喜欢冰咖啡，也请合并考试目标")
+    await plugin.observe_private_user(event)
+    await plugin.buffer_final_reply(
+        event,
+        SimpleNamespace(),
+        SimpleNamespace(role="assistant", completion_text="我会整理"),
+    )
+    scope = "platform\x1fuser"
+    coffee = await plugin.store.create_note(scope, "偏好", "用户喜欢热咖啡")
+    exam_a = await plugin.store.create_note(scope, "目标", "用户在准备考试")
+    exam_b = await plugin.store.create_note(scope, "目标", "用户备考英语")
+    plugin.context.llm_responses.append(
+        SimpleNamespace(
+            completion_text=(
+                '{"memories":['
+                f'{{"action":"update","note_id":{coffee.id},'
+                '"category":"偏好","content":"用户喜欢冰咖啡","reason":"冲突更新"},'
+                f'{{"action":"merge","note_ids":[{exam_a.id},{exam_b.id}],'
+                '"category":"目标","content":"用户在准备英语考试","reason":"近义合并"},'
+                '{"action":"noop","reason":"短期闲聊"}'
+                ']}'
+            )
+        )
+    )
+
+    await plugin.process_extraction_scope(scope)
+
+    notes, _ = await plugin.store.list_notes(scope)
+    assert {note.content for note in notes} == {
+        "用户喜欢冰咖啡",
+        "用户在准备英语考试",
+    }
+    revisions = await plugin.store.list_note_revisions(scope)
+    assert len(revisions) == 3
+
+
+@pytest.mark.asyncio
+async def test_extraction_rejects_non_candidate_note_id_and_keeps_notes(plugin) -> None:
+    event = FakeEvent(message="我喜欢安静")
+    await plugin.observe_private_user(event)
+    await plugin.buffer_final_reply(
+        event,
+        SimpleNamespace(),
+        SimpleNamespace(role="assistant", completion_text="好的"),
+    )
+    scope = "platform\x1fuser"
+    own = await plugin.store.create_note(scope, "偏好", "用户喜欢安静")
+    other_scope = "platform\x1fother"
+    await plugin.store.upsert_user(other_scope, "platform", "other", "Bob")
+    other = await plugin.store.create_note(other_scope, "偏好", "其他用户喜欢咖啡")
+    plugin.context.llm_responses.append(
+        SimpleNamespace(
+            completion_text=(
+                '{"memories":['
+                f'{{"action":"update","note_id":{other.id},'
+                '"category":"偏好","content":"越权内容"}'
+                ']}'
+            )
+        )
+    )
+
+    await plugin.process_extraction_scope(scope)
+
+    assert (await plugin.store.get_note(scope, own.id)).content == "用户喜欢安静"
+    status = await plugin.store.get_extraction_status(scope)
+    assert status.pending_count == 2
+    assert status.next_retry_at is not None
+
+
+@pytest.mark.asyncio
 async def test_extraction_uses_configured_provider_and_retries_failure(plugin) -> None:
     event = FakeEvent(message="我在准备考试")
     await plugin.observe_private_user(event)

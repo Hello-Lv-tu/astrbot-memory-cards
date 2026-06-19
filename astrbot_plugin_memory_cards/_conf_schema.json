@@ -49,6 +49,16 @@
     "description": "单次整理最多新增或更新的便签数",
     "default": 5
   },
+  "auto_extract_candidate_notes": {
+    "type": "int",
+    "description": "自动整理时提供给模型判定的本地候选便签数",
+    "default": 8
+  },
+  "auto_extract_candidate_minimum_score": {
+    "type": "float",
+    "description": "自动整理候选召回的最低分",
+    "default": 0.5
+  },
   "auto_extract_retry_minutes": {
     "type": "int",
     "description": "整理失败后的重试间隔（分钟）",

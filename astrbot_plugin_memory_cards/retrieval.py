@@ -140,3 +140,31 @@ def select_relevant_notes(
         max_notes=min(max_notes, 3),
         max_chars=max_chars,
     )
+
+
+def select_candidate_notes(
+    content: str,
+    category: str,
+    notes: list[MemoryNote],
+    *,
+    max_notes: int = 6,
+    minimum_score: float = 2.0,
+) -> list[MemoryNote]:
+    """Select deterministic same-scope candidates for model adjudication."""
+
+    normalized_content = _normalize(content)
+    if not normalized_content or max_notes < 1:
+        return []
+    normalized_category = str(category or "").strip()
+    scored: list[tuple[float, MemoryNote]] = []
+    for note in notes:
+        score = _score(normalized_content, note)
+        if normalized_category and note.category == normalized_category:
+            score += 2.0
+        if score >= float(minimum_score):
+            scored.append((score, note))
+    scored.sort(
+        key=lambda item: (item[0], item[1].updated_at, item[1].id),
+        reverse=True,
+    )
+    return [note for _, note in scored[:max_notes]]

@@ -12,20 +12,22 @@ from quart import jsonify, request
 
 from .extraction import (
     EXTRACTION_SYSTEM_PROMPT,
+    QUALITY_REVIEW_SYSTEM_PROMPT,
     build_extraction_prompt,
+    build_quality_review_prompt,
     normalize_for_duplicate_check,
     parse_candidates,
 )
 from .injection import build_memory_context
-from .retrieval import select_relevant_notes
+from .retrieval import select_candidate_notes, select_relevant_notes
 from .scheduler import ExtractionScheduler
-from .store import MemoryStore
+from .store import MemoryStore, PreviewExpiredError
 
 PLUGIN_NAME = "astrbot_plugin_memory_cards"
 SCOPE_SEPARATOR = "\x1f"
 
 
-@register(PLUGIN_NAME, "Lv_Tu", "私聊长期记忆卡片", "0.2.0")
+@register(PLUGIN_NAME, "Lv_Tu", "私聊长期记忆卡片", "0.3.0")
 class MemoryCardsPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context, config)
@@ -67,6 +69,19 @@ class MemoryCardsPlugin(Star):
                 ["POST"],
                 "Delete memory note",
             ),
+            (
+                "memory/quality/preview",
+                self.api_quality_preview,
+                ["POST"],
+                "Preview memory quality cleanup",
+            ),
+            (
+                "memory/quality/apply",
+                self.api_quality_apply,
+                ["POST"],
+                "Apply memory quality cleanup",
+            ),
+            ("memory/history", self.api_history, ["GET"], "List memory history"),
         )
         for path, handler, methods, description in routes:
             context.register_web_api(
@@ -203,9 +218,24 @@ class MemoryCardsPlugin(Star):
                 raise RuntimeError("没有可用于整理便签的模型")
 
             existing = await self.store.list_notes_for_retrieval(scope_key)
+            conversation_text = "\n".join(
+                message.content for message in batch.messages if message.role == "user"
+            )
+            candidate_notes = select_candidate_notes(
+                conversation_text,
+                "",
+                existing,
+                max_notes=max(
+                    1,
+                    min(int(self.config.get("auto_extract_candidate_notes", 8)), 20),
+                ),
+                minimum_score=float(
+                    self.config.get("auto_extract_candidate_minimum_score", 0.5)
+                ),
+            )
             response = await self.context.llm_generate(
                 chat_provider_id=provider_id,
-                prompt=build_extraction_prompt(batch.messages, existing),
+                prompt=build_extraction_prompt(batch.messages, candidate_notes),
                 system_prompt=EXTRACTION_SYSTEM_PROMPT,
             )
             candidates = parse_candidates(
@@ -213,30 +243,56 @@ class MemoryCardsPlugin(Star):
                 max_notes=self._config_int(
                     "auto_extract_max_notes", 5, 1, 20
                 ),
+                allowed_note_ids={note.id for note in candidate_notes},
+                reject_invalid=True,
             )
             known = {
                 normalize_for_duplicate_check(note.content) for note in existing
             }
+            operations = []
             for candidate in candidates:
+                if candidate.action == "noop":
+                    operations.append({"action": "noop", "reason": candidate.reason})
+                    continue
                 normalized = normalize_for_duplicate_check(candidate.content)
                 if candidate.action == "create":
                     if normalized in known:
                         continue
-                    await self.store.create_note(
-                        scope_key,
-                        candidate.category,
-                        candidate.content,
-                        source="auto",
-                        source_batch_id=batch.batch_id,
+                    operations.append(
+                        {
+                            "action": "create",
+                            "category": candidate.category,
+                            "content": candidate.content,
+                            "reason": candidate.reason,
+                        }
                     )
                     known.add(normalized)
-                elif candidate.note_id is not None:
-                    await self.store.update_note(
-                        scope_key,
-                        candidate.note_id,
-                        candidate.category,
-                        candidate.content,
+                elif candidate.action == "update" and candidate.note_id is not None:
+                    operations.append(
+                        {
+                            "action": "update",
+                            "note_id": candidate.note_id,
+                            "category": candidate.category,
+                            "content": candidate.content,
+                            "reason": candidate.reason,
+                        }
                     )
+                elif candidate.action == "merge":
+                    operations.append(
+                        {
+                            "action": "merge",
+                            "note_ids": list(candidate.note_ids),
+                            "category": candidate.category,
+                            "content": candidate.content,
+                            "reason": candidate.reason,
+                        }
+                    )
+            if operations:
+                await self.store.apply_memory_operations(
+                    scope_key,
+                    operations,
+                    source_batch_id=batch.batch_id,
+                )
             await self.store.complete_extraction_batch(scope_key, batch.batch_id)
         except asyncio.CancelledError:
             await asyncio.shield(
@@ -421,6 +477,148 @@ class MemoryCardsPlugin(Star):
         if not deleted:
             return self._error("便签不存在或不属于该用户", 404)
         return jsonify({"ok": True})
+
+    async def api_quality_preview(self):
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        payload = await self._json_payload()
+        if payload is None:
+            return self._error("请求内容必须是 JSON 对象", 400)
+        scope_key = str(payload.get("scope_key", "")).strip()
+        if not scope_key:
+            return self._error("缺少 scope_key", 400)
+        try:
+            if not await self.store.user_exists(scope_key):
+                return self._error("用户不存在", 404)
+            notes = await self.store.list_notes_for_retrieval(scope_key)
+            provider_id = self._quality_provider_id()
+            if not provider_id:
+                return self._error(
+                    "请先配置自动整理模型，再生成质量整理预览",
+                    400,
+                )
+            response = await self.context.llm_generate(
+                chat_provider_id=provider_id,
+                prompt=build_quality_review_prompt(notes),
+                system_prompt=QUALITY_REVIEW_SYSTEM_PROMPT,
+            )
+            candidates = parse_candidates(
+                getattr(response, "completion_text", ""),
+                max_notes=20,
+                allowed_note_ids={note.id for note in notes},
+                reject_invalid=True,
+            )
+            operations = self._build_quality_operations(candidates, notes)
+            preview = await self.store.create_quality_preview(scope_key, operations)
+        except ValueError as exc:
+            return self._error(str(exc), 400)
+        except Exception:
+            logger.exception("生成质量整理预览失败")
+            return self._error("生成质量整理预览失败", 500)
+        return jsonify(
+            {
+                "ok": True,
+                "preview": {
+                    "preview_id": preview.preview_id,
+                    "scope_key": preview.scope_key,
+                    "fingerprint": preview.fingerprint,
+                    "items": list(preview.operations),
+                    "created_at": preview.created_at,
+                    "expires_at": preview.expires_at,
+                },
+            }
+        )
+
+    async def api_quality_apply(self):
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        payload = await self._json_payload()
+        if payload is None:
+            return self._error("请求内容必须是 JSON 对象", 400)
+        scope_key = str(payload.get("scope_key", "")).strip()
+        preview_id = str(payload.get("preview_id", "")).strip()
+        if not scope_key or not preview_id:
+            return self._error("scope_key 或 preview_id 无效", 400)
+        try:
+            notes = await self.store.apply_quality_preview(scope_key, preview_id)
+        except PreviewExpiredError as exc:
+            return self._error(str(exc), 409)
+        except ValueError as exc:
+            return self._error(str(exc), 400)
+        except Exception:
+            logger.exception("应用质量整理预览失败")
+            return self._error("应用质量整理预览失败", 500)
+        return jsonify({"ok": True, "notes": [asdict(note) for note in notes]})
+
+    async def api_history(self):
+        if not self._active:
+            return self._error("便签存储未就绪", 503)
+        scope_key = str(request.args.get("scope_key", "")).strip()
+        if not scope_key:
+            return self._error("缺少 scope_key", 400)
+        try:
+            limit = int(request.args.get("limit", 50))
+            offset = int(request.args.get("offset", 0))
+        except (TypeError, ValueError):
+            return self._error("分页参数无效", 400)
+        try:
+            items = await self.store.list_note_revisions(
+                scope_key,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception:
+            logger.exception("读取便签历史失败")
+            return self._error("读取便签历史失败", 500)
+        return jsonify({"ok": True, "items": [asdict(item) for item in items]})
+
+    @staticmethod
+    def _build_quality_operations(candidates, notes) -> list[dict]:
+        operations: list[dict] = []
+        notes_by_id = {note.id: note for note in notes}
+        for candidate in candidates:
+            if candidate.action == "noop":
+                continue
+            if candidate.action == "create":
+                raise ValueError("质量整理不允许新增便签")
+            operation = {
+                "action": candidate.action,
+                "category": candidate.category,
+                "content": candidate.content,
+                "reason": candidate.reason,
+            }
+            if candidate.action == "update":
+                operation["note_id"] = candidate.note_id
+                before_ids = [candidate.note_id]
+            elif candidate.action == "merge":
+                operation["note_ids"] = list(candidate.note_ids)
+                before_ids = list(candidate.note_ids)
+            operation["before"] = [
+                {
+                    "id": note.id,
+                    "category": note.category,
+                    "content": note.content,
+                }
+                for note_id in before_ids
+                if (note := notes_by_id.get(note_id)) is not None
+            ]
+            operations.append(operation)
+        return operations
+
+    def _quality_provider_id(self) -> str:
+        configured = str(
+            self.config.get("auto_extract_provider_id", "") or ""
+        ).strip()
+        if configured:
+            return configured
+        get_using_provider = getattr(self.context, "get_using_provider", None)
+        if not callable(get_using_provider):
+            return ""
+        provider = get_using_provider()
+        if provider is None:
+            return ""
+        metadata = provider.meta()
+        return str(getattr(metadata, "id", "") or "").strip()
 
     @staticmethod
     async def _json_payload() -> dict | None:
