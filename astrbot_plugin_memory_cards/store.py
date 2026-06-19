@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,12 +16,18 @@ from .models import (
     ExtractionBatch,
     ExtractionStatus,
     MemoryNote,
+    NoteRevision,
+    QualityPreview,
     UserSummary,
     normalize_category,
     normalize_content,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+class PreviewExpiredError(RuntimeError):
+    """Raised when a quality preview no longer matches current notes."""
 
 
 def _now() -> str:
@@ -94,6 +102,7 @@ class MemoryStore:
                         "INSERT INTO schema_meta(version) VALUES (?)",
                         (SCHEMA_VERSION,),
                     )
+                    row_version = SCHEMA_VERSION
                 elif int(row["version"]) == 1:
                     await connection.execute(
                         "ALTER TABLE notes ADD COLUMN source TEXT "
@@ -104,12 +113,23 @@ class MemoryStore:
                     )
                     await connection.execute(
                         "UPDATE schema_meta SET version = ?",
+                        (2,),
+                    )
+                    row_version = 2
+                else:
+                    row_version = int(row["version"])
+                if row_version == 2:
+                    await self._ensure_v3_schema(connection)
+                    await connection.execute(
+                        "UPDATE schema_meta SET version = ?",
                         (SCHEMA_VERSION,),
                     )
-                elif int(row["version"]) != SCHEMA_VERSION:
+                elif row_version != SCHEMA_VERSION:
                     raise RuntimeError(
-                        f"不支持的数据库版本: {row['version']}"
+                        f"不支持的数据库版本: {row_version}"
                     )
+                else:
+                    await self._ensure_v3_schema(connection)
                 await connection.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS message_buffer (
@@ -142,6 +162,41 @@ class MemoryStore:
                 await connection.close()
                 raise
             self._connection = connection
+
+    @staticmethod
+    async def _ensure_v3_schema(connection: aiosqlite.Connection) -> None:
+        await connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS note_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_key TEXT NOT NULL,
+                note_id INTEGER NOT NULL,
+                merged_note_id INTEGER,
+                before_category TEXT NOT NULL,
+                before_content TEXT NOT NULL,
+                change_type TEXT NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                source_batch_id TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(scope_key) REFERENCES users(scope_key)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_revisions_scope_created
+                ON note_revisions(scope_key, created_at DESC, id DESC);
+            CREATE TABLE IF NOT EXISTS quality_previews (
+                preview_id TEXT PRIMARY KEY,
+                scope_key TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                operations_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(scope_key) REFERENCES users(scope_key)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_previews_scope_created
+                ON quality_previews(scope_key, created_at DESC);
+            """
+        )
 
     async def close(self) -> None:
         async with self._lock:
@@ -433,6 +488,376 @@ class MemoryStore:
                 return None
             return await self._get_note(connection, scope_key, note_id)
 
+    async def apply_memory_operations(
+        self,
+        scope_key: str,
+        operations: list[dict],
+        *,
+        source_batch_id: str | None = None,
+    ) -> list[MemoryNote]:
+        async with self._lock:
+            connection = self._require_connection()
+            try:
+                await connection.execute("BEGIN")
+                notes = await self._apply_memory_operations_locked(
+                    connection,
+                    scope_key,
+                    operations,
+                    source_batch_id=source_batch_id,
+                )
+                await connection.commit()
+                return notes
+            except Exception:
+                await connection.rollback()
+                raise
+
+    async def _apply_memory_operations_locked(
+        self,
+        connection: aiosqlite.Connection,
+        scope_key: str,
+        operations: list[dict] | tuple[dict, ...],
+        *,
+        source_batch_id: str | None = None,
+    ) -> list[MemoryNote]:
+        if not await self._user_exists(connection, scope_key):
+            raise ValueError("用户不存在")
+        updated: list[MemoryNote] = []
+        for raw_operation in operations:
+            if not isinstance(raw_operation, dict):
+                raise ValueError("操作无效")
+            action = str(raw_operation.get("action", "")).strip()
+            if action == "noop":
+                continue
+            if action == "create":
+                note = await self._insert_note_locked(
+                    connection,
+                    scope_key,
+                    str(raw_operation.get("category", "其他")),
+                    str(raw_operation.get("content", "")),
+                    source="auto",
+                    source_batch_id=source_batch_id,
+                )
+                updated.append(note)
+            elif action == "update":
+                note_id = self._positive_int(raw_operation.get("note_id"))
+                if note_id is None:
+                    raise ValueError("候选便签无效")
+                old = await self._get_note(connection, scope_key, note_id)
+                if old is None:
+                    raise ValueError("候选便签无效")
+                timestamp = _now()
+                await self._record_revision(
+                    connection,
+                    old,
+                    note_id=old.id,
+                    merged_note_id=None,
+                    change_type="update",
+                    reason=str(raw_operation.get("reason", ""))[:500],
+                    source_batch_id=source_batch_id,
+                    timestamp=timestamp,
+                )
+                await connection.execute(
+                    """
+                    UPDATE notes
+                    SET category = ?, content = ?, updated_at = ?,
+                        source = 'auto', source_batch_id = ?
+                    WHERE scope_key = ? AND id = ?
+                    """,
+                    (
+                        normalize_category(str(raw_operation.get("category", "其他"))),
+                        normalize_content(str(raw_operation.get("content", ""))),
+                        timestamp,
+                        source_batch_id,
+                        scope_key,
+                        old.id,
+                    ),
+                )
+                note = await self._get_note(connection, scope_key, old.id)
+                if note is not None:
+                    updated.append(note)
+            elif action == "merge":
+                ids = raw_operation.get("note_ids")
+                if not isinstance(ids, list) or len(ids) < 2:
+                    raise ValueError("候选便签无效")
+                note_ids = [self._positive_int(item) for item in ids]
+                if any(item is None for item in note_ids):
+                    raise ValueError("候选便签无效")
+                distinct_ids = sorted(
+                    {int(item) for item in note_ids if item is not None}
+                )
+                if len(distinct_ids) < 2:
+                    raise ValueError("候选便签无效")
+                notes = [
+                    await self._get_note(connection, scope_key, note_id)
+                    for note_id in distinct_ids
+                ]
+                if any(note is None for note in notes):
+                    raise ValueError("候选便签无效")
+                existing = [note for note in notes if note is not None]
+                keep = min(existing, key=lambda item: (item.created_at, item.id))
+                timestamp = _now()
+                for old in existing:
+                    await self._record_revision(
+                        connection,
+                        old,
+                        note_id=keep.id,
+                        merged_note_id=None if old.id == keep.id else old.id,
+                        change_type="merge",
+                        reason=str(raw_operation.get("reason", ""))[:500],
+                        source_batch_id=source_batch_id,
+                        timestamp=timestamp,
+                    )
+                await connection.execute(
+                    """
+                    UPDATE notes
+                    SET category = ?, content = ?, updated_at = ?,
+                        source = 'auto', source_batch_id = ?
+                    WHERE scope_key = ? AND id = ?
+                    """,
+                    (
+                        normalize_category(str(raw_operation.get("category", "其他"))),
+                        normalize_content(str(raw_operation.get("content", ""))),
+                        timestamp,
+                        source_batch_id,
+                        scope_key,
+                        keep.id,
+                    ),
+                )
+                remove_ids = [note.id for note in existing if note.id != keep.id]
+                placeholders = ",".join("?" for _ in remove_ids)
+                await connection.execute(
+                    f"DELETE FROM notes WHERE scope_key = ? AND id IN ({placeholders})",
+                    [scope_key, *remove_ids],
+                )
+                note = await self._get_note(connection, scope_key, keep.id)
+                if note is not None:
+                    updated.append(note)
+            else:
+                raise ValueError("操作无效")
+        return updated
+
+    async def _insert_note_locked(
+        self,
+        connection: aiosqlite.Connection,
+        scope_key: str,
+        category: str,
+        content: str,
+        *,
+        source: str,
+        source_batch_id: str | None,
+    ) -> MemoryNote:
+        normalized_content = normalize_content(content)
+        normalized_category = normalize_category(category)
+        timestamp = _now()
+        cursor = await connection.execute(
+            """
+            INSERT INTO notes(
+                scope_key, category, content, created_at, updated_at,
+                source, source_batch_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                scope_key,
+                normalized_category,
+                normalized_content,
+                timestamp,
+                timestamp,
+                "auto" if source == "auto" else "manual",
+                source_batch_id,
+            ),
+        )
+        note_id = int(cursor.lastrowid or 0)
+        await cursor.close()
+        note = await self._get_note(connection, scope_key, note_id)
+        if note is None:
+            raise RuntimeError("新增便签失败")
+        return note
+
+    @staticmethod
+    async def _record_revision(
+        connection: aiosqlite.Connection,
+        old: MemoryNote,
+        *,
+        note_id: int,
+        merged_note_id: int | None,
+        change_type: str,
+        reason: str,
+        source_batch_id: str | None,
+        timestamp: str,
+    ) -> None:
+        await connection.execute(
+            """
+            INSERT INTO note_revisions(
+                scope_key, note_id, merged_note_id, before_category,
+                before_content, change_type, reason, source_batch_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                old.scope_key,
+                note_id,
+                merged_note_id,
+                old.category,
+                old.content,
+                change_type,
+                reason,
+                source_batch_id,
+                timestamp,
+            ),
+        )
+
+    async def list_note_revisions(
+        self,
+        scope_key: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[NoteRevision]:
+        async with self._lock:
+            connection = self._require_connection()
+            cursor = await connection.execute(
+                """
+                SELECT id, scope_key, note_id, merged_note_id, before_category,
+                       before_content, change_type, reason, source_batch_id,
+                       created_at
+                FROM note_revisions
+                WHERE scope_key = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (scope_key, max(1, min(int(limit), 200)), max(0, int(offset))),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+        return [self._revision_from_row(row) for row in rows]
+
+    async def create_quality_preview(
+        self,
+        scope_key: str,
+        operations: list[dict],
+        *,
+        ttl_minutes: int = 30,
+    ) -> QualityPreview:
+        created_at = _now()
+        expires_at = datetime.fromisoformat(created_at) + timedelta(
+            minutes=max(1, int(ttl_minutes))
+        )
+        async with self._lock:
+            connection = self._require_connection()
+            if not await self._user_exists(connection, scope_key):
+                raise ValueError("用户不存在")
+            fingerprint = await self._fingerprint_locked(connection, scope_key)
+            preview_id = uuid4().hex
+            normalized_ops = tuple(dict(item) for item in operations)
+            await connection.execute(
+                """
+                INSERT INTO quality_previews(
+                    preview_id, scope_key, fingerprint, operations_json,
+                    created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    preview_id,
+                    scope_key,
+                    fingerprint,
+                    json.dumps(normalized_ops, ensure_ascii=False, sort_keys=True),
+                    created_at,
+                    expires_at.isoformat(timespec="microseconds"),
+                ),
+            )
+            await connection.commit()
+        return QualityPreview(
+            preview_id,
+            scope_key,
+            fingerprint,
+            normalized_ops,
+            created_at,
+            expires_at.isoformat(timespec="microseconds"),
+        )
+
+    async def apply_quality_preview(
+        self,
+        scope_key: str,
+        preview_id: str,
+    ) -> list[MemoryNote]:
+        async with self._lock:
+            connection = self._require_connection()
+            try:
+                await connection.execute("BEGIN")
+                cursor = await connection.execute(
+                    """
+                    SELECT preview_id, scope_key, fingerprint, operations_json,
+                           created_at, expires_at
+                    FROM quality_previews
+                    WHERE preview_id = ? AND scope_key = ?
+                    """,
+                    (str(preview_id), scope_key),
+                )
+                row = await cursor.fetchone()
+                await cursor.close()
+                if row is None:
+                    raise PreviewExpiredError("整理预览不存在或已过期")
+                if datetime.fromisoformat(row["expires_at"]) < datetime.now(UTC):
+                    raise PreviewExpiredError("整理预览已过期")
+                current = await self._fingerprint_locked(connection, scope_key)
+                if current != row["fingerprint"]:
+                    raise PreviewExpiredError("便签已变化，请重新生成预览")
+                operations = json.loads(row["operations_json"])
+                notes = await self._apply_memory_operations_locked(
+                    connection,
+                    scope_key,
+                    operations,
+                    source_batch_id=f"preview:{preview_id}",
+                )
+                await connection.execute(
+                    "DELETE FROM quality_previews WHERE preview_id = ?",
+                    (str(preview_id),),
+                )
+                await connection.commit()
+                return notes
+            except Exception:
+                await connection.rollback()
+                raise
+
+    async def _fingerprint_locked(
+        self,
+        connection: aiosqlite.Connection,
+        scope_key: str,
+    ) -> str:
+        cursor = await connection.execute(
+            """
+            SELECT id, category, content, created_at, updated_at, source,
+                   source_batch_id
+            FROM notes
+            WHERE scope_key = ?
+            ORDER BY id ASC
+            """,
+            (scope_key,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        payload = [
+            [
+                int(row["id"]),
+                row["category"],
+                row["content"],
+                row["created_at"],
+                row["updated_at"],
+                row["source"],
+                row["source_batch_id"],
+            ]
+            for row in rows
+        ]
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _positive_int(value) -> int | None:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
     async def delete_note(self, scope_key: str, note_id: int) -> bool:
         async with self._lock:
             connection = self._require_connection()
@@ -700,4 +1125,20 @@ class MemoryStore:
             processing_batch_id=row["processing_batch_id"],
             last_error=row["last_error"],
             last_extracted_at=row["last_extracted_at"],
+        )
+
+    @staticmethod
+    def _revision_from_row(row: aiosqlite.Row) -> NoteRevision:
+        merged_note_id = row["merged_note_id"]
+        return NoteRevision(
+            id=int(row["id"]),
+            scope_key=row["scope_key"],
+            note_id=int(row["note_id"]),
+            merged_note_id=int(merged_note_id) if merged_note_id is not None else None,
+            before_category=row["before_category"],
+            before_content=row["before_content"],
+            change_type=row["change_type"],
+            reason=row["reason"],
+            source_batch_id=row["source_batch_id"],
+            created_at=row["created_at"],
         )

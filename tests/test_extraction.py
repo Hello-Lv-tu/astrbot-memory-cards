@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from astrbot_plugin_memory_cards.extraction import (
     build_extraction_prompt,
     contains_credential_material,
@@ -42,6 +44,43 @@ def test_invalid_json_actions_and_credentials_are_rejected() -> None:
     assert contains_credential_material("验证码 123456")
 
 
+def test_strict_parse_rejects_malformed_json() -> None:
+    with pytest.raises(ValueError, match="非法 JSON"):
+        parse_candidates("not json", max_notes=5, reject_invalid=True)
+
+
+def test_parse_structured_merge_noop_and_candidate_allowlist() -> None:
+    text = """
+    {"memories": [
+      {"action": "merge", "note_ids": [2, 1], "category": "偏好",
+       "content": "用户喜欢安静且简洁的回答", "reason": "近义合并"},
+      {"action": "noop", "reason": "短期闲聊"},
+      {"action": "update", "note_id": 99, "category": "目标", "content": "越权 ID"},
+      {"action": "merge", "note_ids": [1, 99], "category": "目标",
+       "content": "混入越权 ID"}
+    ]}
+    """
+
+    candidates = parse_candidates(text, max_notes=10, allowed_note_ids={1, 2})
+
+    assert [(item.action, item.note_ids, item.note_id) for item in candidates] == [
+        ("merge", (2, 1), None),
+        ("noop", (), None),
+    ]
+
+
+def test_parse_rejects_merge_with_too_few_allowed_notes() -> None:
+    text = """
+    {"memories": [
+      {"action": "merge", "note_ids": [1], "category": "偏好", "content": "不足"},
+      {"action": "merge", "note_ids": [1, 3], "category": "偏好",
+       "content": "包含非候选"}
+    ]}
+    """
+
+    assert parse_candidates(text, max_notes=10, allowed_note_ids={1, 2}) == []
+
+
 def test_prompt_contains_roles_and_existing_note_ids() -> None:
     messages = (
         BufferedMessage(1, "scope", "user", "我喜欢安静", "p", "now"),
@@ -54,3 +93,5 @@ def test_prompt_contains_roles_and_existing_note_ids() -> None:
     assert "用户：我喜欢安静" in prompt
     assert "助手：好的" in prompt
     assert "ID 7" in prompt
+    assert "merge" in prompt
+    assert "noop" in prompt

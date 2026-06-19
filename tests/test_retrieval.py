@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from astrbot_plugin_memory_cards.models import MemoryNote
-from astrbot_plugin_memory_cards.retrieval import select_relevant_notes
+from astrbot_plugin_memory_cards.retrieval import (
+    select_candidate_notes,
+    select_relevant_notes,
+)
 
 
 def note(
@@ -112,3 +115,21 @@ def test_recall_fallback_can_be_disabled() -> None:
         )
         == []
     )
+
+
+def test_candidate_recall_prefers_same_category_and_keyword_overlap() -> None:
+    notes = [
+        note(1, "偏好", "用户喜欢安静的环境"),
+        note(2, "目标", "用户在准备英语考试"),
+        note(3, "偏好", "用户喜欢简洁回答"),
+        note(4, "事件", "用户上周看了电影"),
+    ]
+
+    result = select_candidate_notes(
+        "用户喜欢安静且简洁的回答",
+        "偏好",
+        notes,
+        max_notes=3,
+    )
+
+    assert {item.id for item in result} == {1, 3}

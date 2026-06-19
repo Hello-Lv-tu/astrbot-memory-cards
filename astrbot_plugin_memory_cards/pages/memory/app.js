@@ -10,6 +10,7 @@ const state = {
   keyword: "",
   editingId: null,
   deletingId: null,
+  qualityPreview: null,
   notesRequestVersion: 0,
 };
 
@@ -18,6 +19,8 @@ const elements = {
   searchInput: document.getElementById("search-input"),
   categoryList: document.getElementById("category-list"),
   newNote: document.getElementById("new-note"),
+  qualityButton: document.getElementById("quality-button"),
+  historyButton: document.getElementById("history-button"),
   noteGrid: document.getElementById("note-grid"),
   noteCount: document.getElementById("note-count"),
   status: document.getElementById("status"),
@@ -31,6 +34,13 @@ const elements = {
   contentCount: document.getElementById("content-count"),
   deleteDialog: document.getElementById("delete-dialog"),
   confirmDelete: document.getElementById("confirm-delete"),
+  qualityPanel: document.getElementById("quality-panel"),
+  qualityList: document.getElementById("quality-list"),
+  qualityFingerprint: document.getElementById("quality-fingerprint"),
+  applyQuality: document.getElementById("apply-quality"),
+  cancelQuality: document.getElementById("cancel-quality"),
+  historyPanel: document.getElementById("history-panel"),
+  historyList: document.getElementById("history-list"),
 };
 
 function setStatus(message, isError = false) {
@@ -154,6 +164,64 @@ function renderNotes() {
   }
 }
 
+function renderQualityPreview(preview) {
+  elements.qualityList.replaceChildren();
+  elements.qualityPanel.hidden = false;
+  elements.qualityFingerprint.textContent = preview?.fingerprint
+    ? "版本指纹：" + preview.fingerprint
+    : "";
+  const items = preview?.items || [];
+  elements.applyQuality.disabled = !preview?.preview_id || items.length === 0;
+  if (items.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "当前没有可整理项。";
+    elements.qualityList.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("article");
+    row.className = "quality-item";
+    const title = document.createElement("h3");
+    title.textContent = item.action;
+    const content = document.createElement("p");
+    content.textContent = item.content || item.reason || "";
+    const before = document.createElement("p");
+    before.className = "muted";
+    before.textContent = item.before?.length
+      ? "整理前：" + item.before.map((note) => note.content).join(" / ")
+      : "";
+    const ids = document.createElement("p");
+    ids.className = "muted";
+    ids.textContent = item.note_ids ? "候选 ID：" + item.note_ids.join(", ") : "";
+    row.append(title, before, content, ids);
+    elements.qualityList.append(row);
+  }
+}
+
+function renderHistory(items) {
+  elements.historyList.replaceChildren();
+  elements.historyPanel.hidden = false;
+  if (items.length === 0) {
+    const empty = document.createElement("p");
+    empty.textContent = "暂无变更历史。";
+    elements.historyList.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const row = document.createElement("article");
+    row.className = "history-item";
+    const title = document.createElement("h3");
+    title.textContent = item.change_type + " · #" + item.note_id;
+    const content = document.createElement("p");
+    content.textContent = item.before_content;
+    const reason = document.createElement("p");
+    reason.className = "muted";
+    reason.textContent = item.reason || formatDate(item.created_at);
+    row.append(title, content, reason);
+    elements.historyList.append(row);
+  }
+}
+
 async function loadUsers() {
   setStatus("正在读取私聊用户…");
   try {
@@ -256,8 +324,79 @@ async function deleteNote() {
   }
 }
 
+async function loadQualityPreview() {
+  if (!state.scopeKey) {
+    setStatus("请先选择私聊用户。", true);
+    return;
+  }
+  setStatus("正在生成质量整理预览…");
+  try {
+    const result = unwrap(
+      await bridge.apiPost("memory/quality/preview", {
+        scope_key: state.scopeKey,
+      }),
+    );
+    state.qualityPreview = result.preview;
+    renderQualityPreview(result.preview);
+    setStatus("质量整理预览已生成。");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+async function applyQualityPreview() {
+  if (!state.qualityPreview?.preview_id) {
+    return;
+  }
+  setStatus("正在应用质量整理…");
+  try {
+    unwrap(
+      await bridge.apiPost("memory/quality/apply", {
+        scope_key: state.scopeKey,
+        preview_id: state.qualityPreview.preview_id,
+      }),
+    );
+    state.qualityPreview = null;
+    elements.qualityPanel.hidden = true;
+    await loadUsers();
+    setStatus("质量整理已应用。");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
+function cancelQualityPreview() {
+  state.qualityPreview = null;
+  elements.qualityPanel.hidden = true;
+  elements.qualityList.replaceChildren();
+  setStatus("已取消质量整理。");
+}
+
+async function loadHistory() {
+  if (!state.scopeKey) {
+    setStatus("请先选择私聊用户。", true);
+    return;
+  }
+  setStatus("正在读取变更历史…");
+  try {
+    const result = unwrap(
+      await bridge.apiGet("memory/history", {
+        scope_key: state.scopeKey,
+        limit: 100,
+        offset: 0,
+      }),
+    );
+    renderHistory(result.items);
+    setStatus("变更历史已读取。");
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+}
+
 elements.userSelect.addEventListener("change", async () => {
   state.scopeKey = elements.userSelect.value;
+  cancelQualityPreview();
+  elements.historyPanel.hidden = true;
   await loadNotes();
 });
 
@@ -283,6 +422,10 @@ elements.categoryList.addEventListener("click", async (event) => {
 });
 
 elements.newNote.addEventListener("click", () => openEditor());
+elements.qualityButton.addEventListener("click", loadQualityPreview);
+elements.historyButton.addEventListener("click", loadHistory);
+elements.applyQuality.addEventListener("click", applyQualityPreview);
+elements.cancelQuality.addEventListener("click", cancelQualityPreview);
 elements.noteContent.addEventListener("input", () => {
   elements.contentCount.textContent = String(elements.noteContent.value.length);
 });

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from astrbot_plugin_memory_cards.models import MAX_CONTENT_LENGTH
-from astrbot_plugin_memory_cards.store import MemoryStore
+from astrbot_plugin_memory_cards.store import MemoryStore, PreviewExpiredError
 
 
 @pytest.fixture
@@ -189,6 +189,184 @@ async def test_v1_database_migrates_notes_to_manual_source(tmp_path) -> None:
     assert notes[0].source == "manual"
     assert notes[0].source_batch_id is None
     await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_database_migrates_to_v3_without_rewriting_notes(tmp_path) -> None:
+    path = tmp_path / "memory.db"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE schema_meta (version INTEGER NOT NULL);
+        INSERT INTO schema_meta(version) VALUES (2);
+        CREATE TABLE users (
+            scope_key TEXT PRIMARY KEY,
+            platform_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        );
+        CREATE TABLE notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_key TEXT NOT NULL,
+            category TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',
+            source_batch_id TEXT
+        );
+        INSERT INTO users VALUES ('p' || char(31) || 'u', 'p', 'u', 'Alice', 'seen');
+        INSERT INTO notes(
+            id, scope_key, category, content, created_at, updated_at,
+            source, source_batch_id
+        )
+        VALUES (
+            42, 'p' || char(31) || 'u', '偏好', '用户喜欢低噪音环境',
+            'created', 'updated', 'manual', NULL
+        );
+        """
+    )
+    connection.commit()
+    connection.close()
+
+    migrated = MemoryStore(path)
+    await migrated.open()
+
+    notes, total = await migrated.list_notes("pu")
+    revisions = await migrated.list_note_revisions("pu")
+
+    assert total == 1
+    assert notes[0].id == 42
+    assert notes[0].created_at == "created"
+    assert notes[0].updated_at == "updated"
+    assert notes[0].content == "用户喜欢低噪音环境"
+    assert revisions == []
+    await migrated.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_update_records_revision_and_preserves_note_id(store) -> None:
+    scope = "pu"
+    await store.upsert_user(scope, "p", "u", "Alice")
+    note = await store.create_note(scope, "偏好", "用户喜欢茶")
+
+    updated = await store.apply_memory_operations(
+        scope,
+        [
+            {
+                "action": "update",
+                "note_id": note.id,
+                "category": "偏好",
+                "content": "用户喜欢乌龙茶",
+                "reason": "新信息更具体",
+            }
+        ],
+        source_batch_id="batch-a",
+    )
+
+    assert [item.id for item in updated] == [note.id]
+    assert updated[0].content == "用户喜欢乌龙茶"
+    revisions = await store.list_note_revisions(scope)
+    assert len(revisions) == 1
+    assert revisions[0].note_id == note.id
+    assert revisions[0].merged_note_id is None
+    assert revisions[0].change_type == "update"
+    assert revisions[0].before_content == "用户喜欢茶"
+    assert revisions[0].source_batch_id == "batch-a"
+
+
+@pytest.mark.asyncio
+async def test_apply_merge_keeps_earliest_note_and_records_removed_note(store) -> None:
+    scope = "pu"
+    await store.upsert_user(scope, "p", "u", "Alice")
+    first = await store.create_note(scope, "目标", "用户在准备考试")
+    second = await store.create_note(scope, "目标", "用户备考英语")
+
+    updated = await store.apply_memory_operations(
+        scope,
+        [
+            {
+                "action": "merge",
+                "note_ids": [second.id, first.id],
+                "category": "目标",
+                "content": "用户在准备英语考试",
+                "reason": "近义合并",
+            }
+        ],
+        source_batch_id="batch-b",
+    )
+
+    notes, total = await store.list_notes(scope)
+    assert total == 1
+    assert notes[0].id == first.id
+    assert updated[0].id == first.id
+    assert notes[0].content == "用户在准备英语考试"
+    revisions = await store.list_note_revisions(scope)
+    revision_keys = {
+        (item.note_id, item.merged_note_id, item.change_type)
+        for item in revisions
+    }
+    assert revision_keys == {
+        (first.id, None, "merge"),
+        (first.id, second.id, "merge"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_apply_operations_rolls_back_on_invalid_cross_scope_note(store) -> None:
+    await store.upsert_user("pu1", "p", "u1", "Alice")
+    await store.upsert_user("pu2", "p", "u2", "Bob")
+    own = await store.create_note("pu1", "偏好", "用户喜欢绿茶")
+    other = await store.create_note("pu2", "偏好", "其他用户喜欢咖啡")
+
+    with pytest.raises(ValueError, match="候选便签无效"):
+        await store.apply_memory_operations(
+            "pu1",
+            [
+                {
+                    "action": "update",
+                    "note_id": own.id,
+                    "category": "偏好",
+                    "content": "用户喜欢红茶",
+                },
+                {
+                    "action": "update",
+                    "note_id": other.id,
+                    "category": "偏好",
+                    "content": "越权内容",
+                },
+            ],
+            source_batch_id="batch-c",
+        )
+
+    assert (await store.get_note("pu1", own.id)).content == "用户喜欢绿茶"
+    assert await store.list_note_revisions("pu1") == []
+
+
+@pytest.mark.asyncio
+async def test_quality_preview_fingerprint_rejects_stale_apply(store) -> None:
+    scope = "pu"
+    await store.upsert_user(scope, "p", "u", "Alice")
+    note = await store.create_note(scope, "偏好", "用户喜欢热咖啡")
+    preview = await store.create_quality_preview(
+        scope,
+        [
+            {
+                "action": "update",
+                "note_id": note.id,
+                "category": "偏好",
+                "content": "用户喜欢冰咖啡",
+                "reason": "冲突更新",
+            }
+        ],
+    )
+    await store.create_note(scope, "目标", "用户计划学习 Python")
+
+    with pytest.raises(PreviewExpiredError):
+        await store.apply_quality_preview(scope, preview.preview_id)
+
+    assert (await store.get_note(scope, note.id)).content == "用户喜欢热咖啡"
 
 
 @pytest.mark.asyncio
